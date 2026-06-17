@@ -34,12 +34,12 @@ It only **reads** other agents' files; nothing to configure per agent.
 Requires [Bun](https://bun.sh) ≥ 1.3 (loopbase uses `bun:sqlite`).
 
 ```sh
-bun add -g loopbase        # installs `loopbase` (+ `lb` alias) globally
+bun add -g @superdesign/loopbase   # installs `loopbase` (+ `lb` alias) globally
 loopbase --help
-loopbase list              # lists this repo's sessions across agents
+loopbase list                      # lists this repo's sessions across agents
 ```
 
-Or run it without installing: `bunx loopbase list`.
+Or run it without installing: `bunx @superdesign/loopbase list`.
 
 **From source / standalone binary** (no Bun needed at runtime):
 

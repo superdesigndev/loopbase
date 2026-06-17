@@ -36,8 +36,8 @@ the environment — agents pass nothing.
 loopbase runs on [Bun](https://bun.sh) ≥ 1.3 (it uses `bun:sqlite`).
 
 ```sh
-bun add -g loopbase     # installs `loopbase` (+ `lb` alias) globally
-bunx loopbase list      # or run without installing
+bun add -g @superdesign/loopbase   # installs `loopbase` (+ `lb` alias) globally
+bunx @superdesign/loopbase list    # or run without installing
 ```
 
 Prefer a standalone binary (no runtime needed)? See [INSTALL.md](./INSTALL.md).
