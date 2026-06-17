@@ -1,0 +1,55 @@
+{
+  "name": "loopbase",
+  "version": "0.1.0",
+  "description": "Cross-session agent memory — discover, read, search, and hand off work across local AI agent sessions (Claude Code, Codex, pi).",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "AI Jason",
+  "homepage": "https://github.com/superdesigndev/loopbase#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superdesigndev/loopbase.git"
+  },
+  "bugs": {
+    "url": "https://github.com/superdesigndev/loopbase/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "claude-code",
+    "codex",
+    "cli",
+    "memory",
+    "context",
+    "worklog",
+    "bun"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "SKILL.md",
+    "INSTALL.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "loopbase": "./src/cli.ts",
+    "lb": "./src/cli.ts"
+  },
+  "scripts": {
+    "loopbase": "bun run src/cli.ts",
+    "lb": "bun run src/cli.ts",
+    "serve:dev": "bun --hot run src/cli.ts serve",
+    "build": "bun build ./src/cli.ts --compile --outfile dist/loopbase",
+    "lint": "bun run src/lint.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run lint && bun run typecheck && bun test",
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "bun-types": "^1.3.14"
+  }
+}
