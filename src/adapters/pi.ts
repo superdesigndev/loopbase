@@ -6,7 +6,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
-import { Glob } from "bun";
 import {
   type Adapter,
   type SourceFile,
@@ -19,6 +18,7 @@ import {
   toEpochMs,
 } from "./types.ts";
 import { deriveFromEvents } from "./claude.ts";
+import { scanProjectDirs } from "./scan.ts";
 
 const ROOT = join(homedir(), ".pi", "agent", "sessions");
 
@@ -28,7 +28,7 @@ export const piAdapter: Adapter = {
   enumerate(): SourceFile[] {
     if (!existsSync(ROOT)) return [];
     const files: SourceFile[] = [];
-    for (const rel of new Glob("*/*.jsonl").scanSync(ROOT)) {
+    for (const rel of scanProjectDirs(ROOT, "*.jsonl")) {
       if (rel.includes(".trajectory.")) continue; // observability stream, not a transcript
       const path = join(ROOT, rel);
       files.push({ path, mtimeMs: safeMtime(path), kind: "session" });
