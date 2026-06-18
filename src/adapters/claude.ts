@@ -20,6 +20,7 @@ import {
   toEpochMs,
   ellipsize,
 } from "./types.ts";
+import { scanProjectDirs } from "./scan.ts";
 
 const ROOT = join(homedir(), ".claude", "projects");
 
@@ -38,12 +39,12 @@ export const claudeAdapter: Adapter = {
     if (!existsSync(ROOT)) return [];
     const files: SourceFile[] = [];
     // Main sessions: <project>/<uuid>.jsonl
-    for (const rel of new Glob("*/*.jsonl").scanSync(ROOT)) {
+    for (const rel of scanProjectDirs(ROOT, "*.jsonl")) {
       const path = join(ROOT, rel);
       files.push({ path, mtimeMs: statMtime(path), kind: "session" });
     }
     // Subagents: <project>/<session>/subagents/agent-<id>.jsonl
-    for (const rel of new Glob("*/*/subagents/agent-*.jsonl").scanSync(ROOT)) {
+    for (const rel of scanProjectDirs(ROOT, "*/subagents/agent-*.jsonl")) {
       const path = join(ROOT, rel);
       const parentNativeId = rel.split("/")[1]; // <project>/<SESSION>/subagents/...
       const agentId = basename(path).replace(/^agent-/, "").replace(/\.jsonl$/, "");
