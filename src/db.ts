@@ -104,6 +104,25 @@ CREATE TABLE IF NOT EXISTS session_cost (
   PRIMARY KEY (session_native_id, model)
 );
 CREATE INDEX IF NOT EXISTS idx_scost_session ON session_cost(session_native_id);
+
+-- One row per tool call in a session's main transcript. The stored FACT layer
+-- for insights; aggregates (frequency, sequences, errors) are computed at READ
+-- time over this table, never materialized. Derived; rebuilt from source.
+-- turn = the user-turn ordinal containing the call, so an insight example
+-- feeds straight into 'show --turn'. (docs/INSIGHTS.md -> architecture.)
+CREATE TABLE IF NOT EXISTS tool_call (
+  session_native_id TEXT NOT NULL,
+  seq               INTEGER NOT NULL,   -- tool-call index within the session
+  turn              INTEGER,            -- user-turn ordinal; null if pre-first-turn
+  name              TEXT NOT NULL,      -- tool name (Bash, Read, mcp__x__y, …)
+  arg_sig           TEXT NOT NULL,      -- normalized signature (the bucket key)
+  est_tokens        INTEGER DEFAULT 0,  -- I/O-size token estimate (cost weight)
+  has_error         INTEGER DEFAULT 0,
+  error_class       TEXT,
+  PRIMARY KEY (session_native_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_toolcall_session ON tool_call(session_native_id);
+CREATE INDEX IF NOT EXISTS idx_toolcall_sig ON tool_call(name, arg_sig);
 `;
 
 let _db: Database | null = null;
@@ -125,7 +144,8 @@ export function openDb(): Database {
   if (stale) {
     db.exec(
       "DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS agent_threads;" +
-        " DROP TABLE IF EXISTS message_tokens; DROP TABLE IF EXISTS session_cost;",
+        " DROP TABLE IF EXISTS message_tokens; DROP TABLE IF EXISTS session_cost;" +
+        " DROP TABLE IF EXISTS tool_call;",
     );
   }
   db.exec(SCHEMA);

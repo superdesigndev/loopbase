@@ -89,6 +89,7 @@ export const claudeAdapter: Adapter = {
       if (tr) {
         ev.role = "tool_result";
         ev.toolResultId = tr.id;
+        if (tr.isError) ev.toolResultError = true;
         if (!ev.text) ev.text = tr.text;
       }
       events.push(ev);
@@ -191,11 +192,11 @@ function extractTools(content: unknown): ToolCall[] {
   return tools;
 }
 
-function extractToolResult(content: unknown): { id: string; text: string } | null {
+function extractToolResult(content: unknown): { id: string; text: string; isError: boolean } | null {
   if (!Array.isArray(content)) return null;
   for (const b of content as any[]) {
     if (b && typeof b === "object" && b.type === "tool_result" && typeof b.tool_use_id === "string") {
-      return { id: b.tool_use_id, text: extractText(b.content) };
+      return { id: b.tool_use_id, text: extractText(b.content), isError: b.is_error === true };
     }
   }
   return null;

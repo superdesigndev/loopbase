@@ -14,6 +14,8 @@ import {
   type ListFilter,
 } from "./queries.ts";
 import { adapterFor } from "./adapters/registry.ts";
+import { ANALYZERS, ANALYZER_NAMES, type InsightFilter } from "./insights.ts";
+import { shortId } from "./commands/list.ts";
 import { parseDuration } from "./time.ts";
 import { INDEX_HTML } from "./web/index-html.ts";
 
@@ -54,6 +56,25 @@ export function handle(req: Request): Response {
     const sessions = costForProject(f);
     const total = sessions.reduce<number | null>((s, r) => (r.total_usd === null ? s : (s ?? 0) + r.total_usd), null);
     return json({ total_usd: total, count: sessions.length, sessions });
+  }
+
+  // Insights: automation candidates through the SAME shared analyzers the CLI
+  // uses — serve and `lb insights` can't drift. Reads the stored tool_call facts.
+  if (p === "/api/insights") {
+    if (process.env.LB_SKIP_REINDEX !== "1") reindex();
+    const lf = filterFromUrl(u);
+    const top = Math.min(100, Math.max(1, Number(u.searchParams.get("top") ?? "20") || 20));
+    const f: InsightFilter = { project: lf.project, all: lf.all, sinceMs: lf.sinceMs, agent: lf.agent, top };
+    const requested = u.searchParams.get("analyzer");
+    const names = requested ? requested.split(",").map((s) => s.trim()).filter((n) => ANALYZERS[n]) : ANALYZER_NAMES;
+    const analyzers: Record<string, unknown[]> = {};
+    for (const n of names) {
+      analyzers[n] = ANALYZERS[n]!(f).map((s) => ({
+        ...s,
+        examples: s.examples.map((e) => ({ session: shortId(e.session), turn: e.turn })),
+      }));
+    }
+    return json({ analyzers });
   }
 
   if (p === "/api/summary") {

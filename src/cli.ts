@@ -12,6 +12,7 @@ import { runShow } from "./commands/show.ts";
 import { runLog } from "./commands/log.ts";
 import { runSearch } from "./commands/search.ts";
 import { runCost } from "./commands/cost.ts";
+import { runInsights } from "./commands/insights.ts";
 import { runServe } from "./commands/serve.ts";
 
 type Handler = (inv: Invocation) => Promise<void> | void;
@@ -22,6 +23,7 @@ const handlers: Record<string, Handler> = {
   show: (inv) => runShow(inv),
   search: (inv) => runSearch(inv),
   cost: (inv) => runCost(inv),
+  insights: (inv) => runInsights(inv),
   serve: (inv) => runServe(inv),
   index: (inv) => {
     const stats = reindex({ rebuild: inv.flags.rebuild === true });

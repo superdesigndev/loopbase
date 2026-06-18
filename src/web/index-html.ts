@@ -123,6 +123,20 @@ ${FONT_FACE_CSS}
   .empty { padding:70px; text-align:center; color:var(--dim2); font:13px/1.6 var(--mono); }
   footer { display:flex; gap:14px; align-items:center; padding:9px 32px; border-top:1px solid var(--line); color:var(--dim2); font:11px/1 var(--mono); letter-spacing:.05em; }
   footer .blip { width:7px; height:7px; border-radius:50%; background:var(--good); }
+  .tabs { display:flex; gap:6px; margin:10px 0 0; }
+  .tab { background:transparent; border:1px solid var(--line2); color:var(--dim2); padding:4px 14px; border-radius:7px; cursor:pointer; font-size:13px; font-family:inherit; }
+  .tab.on { background:var(--line2); color:var(--fg); }
+  .tab:hover { color:var(--fg); }
+  #insightsView { padding:0 22px 40px; }
+  .ins-note { color:var(--dim2); font-size:13px; margin:4px 0 18px; }
+  .ins-groups { display:flex; flex-direction:column; gap:26px; }
+  .ins-g h3 { margin:0 0 8px; font-size:14px; }
+  .ins-g h3 .n { color:var(--dim2); font-weight:400; margin-left:6px; }
+  .ins-row { display:grid; grid-template-columns:60px 70px 56px 1fr; gap:10px; padding:5px 0; border-top:1px solid var(--line); align-items:baseline; }
+  .ins-row .num { text-align:right; font-variant-numeric:tabular-nums; color:var(--dim2); font-size:12px; }
+  .ins-row .key { font-family:var(--mono); font-size:12.5px; color:var(--fg); word-break:break-word; }
+  .ins-row .key .sample { color:var(--dim2); font-style:italic; }
+  .ins-row .ex { display:block; margin-top:3px; color:var(--dim); font-size:11px; font-family:var(--mono); }
   ::-webkit-scrollbar { width:11px; height:11px; }
   ::-webkit-scrollbar-thumb { background:var(--line2); border:3px solid var(--bg); border-radius:6px; }
   ::-webkit-scrollbar-thumb:hover { background:var(--dim2); }
@@ -130,8 +144,9 @@ ${FONT_FACE_CSS}
 </head>
 <body>
 <header>
-  <h1 class="hero">loopbase <span class="pink">cost</span></h1>
-  <p class="tagline">Token + USD spend across every local agent session — Claude, Codex, pi. List-price estimate.</p>
+  <h1 class="hero">loopbase <span class="pink" id="heroMode">cost</span></h1>
+  <nav class="tabs"><button class="tab on" id="tabCost">Cost</button><button class="tab" id="tabInsights">Insights</button></nav>
+  <p class="tagline" id="tagline">Token + USD spend across every local agent session — Claude, Codex, pi. List-price estimate.</p>
   <div class="statbar">
     <div class="stat"><div class="k">Total spend</div><div class="v big" id="total">…</div></div>
     <div class="stat"><div class="k">Sessions</div><div class="v" id="count">…</div></div>
@@ -142,7 +157,7 @@ ${FONT_FACE_CSS}
     </div>
   </div>
 </header>
-<main>
+<main id="costView">
   <div class="list">
     <div class="lhead"><h2>Sessions by cost</h2><span class="n" id="lcount"></span></div>
     <table id="tbl">
@@ -164,6 +179,10 @@ ${FONT_FACE_CSS}
   </div>
   <aside class="detail" id="detail"></aside>
 </main>
+<section id="insightsView" hidden>
+  <div class="ins-note">Automation <b>candidates</b> — repeated/expensive tool patterns, call sequences, and errors. The "script-it" call is yours.</div>
+  <div id="insGroups" class="ins-groups"></div>
+</section>
 <footer>
   <span class="blip"></span><span id="status">ready</span>
   <span style="margin-left:auto">loopbase · cost memoized at index</span>
@@ -349,9 +368,54 @@ document.querySelectorAll("th[data-sort]").forEach(th => th.onclick = () => {
     th.appendChild(h);
   });
 })();
-$("#agent").onchange = load;
-$("#since").onchange = load;
+$("#agent").onchange = () => { load(); if (curView === "insights") loadInsights(); };
+$("#since").onchange = () => { load(); if (curView === "insights") loadInsights(); };
 $("#group").onchange = render;
+
+// --- Insights view ---------------------------------------------------------
+let curView = "cost", insLoaded = false;
+const insLabels = { "tool-freq": "Repeated tool calls", "tool-ngram": "Repeated sequences", "tool-errors": "Recurring errors" };
+
+function showView(v) {
+  curView = v;
+  $("#costView").hidden = v !== "cost";
+  $("#insightsView").hidden = v !== "insights";
+  $("#tabCost").classList.toggle("on", v === "cost");
+  $("#tabInsights").classList.toggle("on", v === "insights");
+  $("#heroMode").textContent = v === "cost" ? "cost" : "insights";
+  if (v === "insights" && !insLoaded) loadInsights();
+}
+
+async function loadInsights() {
+  insLoaded = true;
+  $("#status").textContent = "analyzing…";
+  const qs = new URLSearchParams({ all: "true", top: "20" });
+  const agent = $("#agent").value, since = $("#since").value;
+  if (agent) qs.set("agent", agent);
+  if (since) qs.set("since", since);
+  let j;
+  try { j = await (await fetch("/api/insights?" + qs)).json(); } catch { $("#status").textContent = "error"; return; }
+  const groups = j.analyzers || {};
+  let html = "";
+  for (const name of ["tool-freq", "tool-ngram", "tool-errors"]) {
+    const rows = groups[name] || [];
+    html += '<div class="ins-g"><h3>' + (insLabels[name] || name) + '<span class="n">' + rows.length + '</span></h3>';
+    if (!rows.length) html += '<div class="ins-note">nothing above the noise floor</div>';
+    for (const r of rows) {
+      const ex = (r.examples || []).map(e => e.session + (e.turn != null ? "#" + e.turn : "")).join("  ");
+      html += '<div class="ins-row"><span class="num">' + fmtTok(r.count) + '×</span><span class="num">' + fmtTok(r.tokens) + '</span><span class="num">' + r.sessions + ' s</span>' +
+        '<span class="key">' + escapeHtml(r.key) + (r.sample ? ' <span class="sample">«' + escapeHtml(r.sample) + '»</span>' : '') +
+        (ex ? '<span class="ex">' + escapeHtml(ex) + '</span>' : '') + '</span></div>';
+    }
+    html += '</div>';
+  }
+  $("#insGroups").innerHTML = html;
+  $("#status").textContent = "ready";
+}
+
+$("#tabCost").onclick = () => showView("cost");
+$("#tabInsights").onclick = () => showView("insights");
+
 load();
 
 // Live reload: poll the page-content hash; reload when the UI source changes

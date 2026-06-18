@@ -44,6 +44,10 @@ export interface Event {
   isSidechain?: boolean;
   // When role === "tool_result": the tool_use id this result is for.
   toolResultId?: string;
+  // When role === "tool_result": whether the tool reported an error. Optional —
+  // adapters that can't tell simply omit it (the insights error analyzer then
+  // counts it as a success). (docs/INSIGHTS.md → fact extraction.)
+  toolResultError?: boolean;
 }
 
 // A source transcript file discovered by an adapter.

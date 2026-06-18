@@ -109,6 +109,20 @@ export const COMMANDS: CommandSpec[] = [
     ],
   },
   {
+    name: "insights",
+    summary: "Ranked automation candidates: repeated/expensive tool patterns, call sequences, and errors.",
+    args: [],
+    flags: [
+      { name: "analyzer", type: "string", desc: "Comma-separated analyzers (default all): tool-freq, tool-ngram, tool-errors." },
+      { name: "path", type: "string", desc: "Scope to another directory instead of cwd." },
+      { name: "all", type: "bool", default: false, desc: "Every project, not just the current one." },
+      { name: "since", type: "string", desc: "Only sessions updated within this window, e.g. 24h, 7d." },
+      { name: "agent", type: "enum", enumValues: ["claude", "codex", "pi"], desc: "Filter by agent." },
+      { name: "top", type: "int", default: 20, desc: "Max candidates per analyzer." },
+      { name: "show-signature", type: "bool", default: false, desc: "Debug: print raw tool call -> normalized signature, to eyeball collapse quality." },
+    ],
+  },
+  {
     name: "serve",
     summary: "Local web UI for sessions + cost (reads the index; re-indexes on each load).",
     args: [],

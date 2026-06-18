@@ -22,6 +22,8 @@ loopbase list                 # sessions in THIS project, each with its worklog 
 loopbase search "<text>"       # find sessions/turns by content (across agents) → a `turn` handle
 loopbase show <session_id>     # read/understand one session (map by default, then drill)
 loopbase log  "<what I did>"   # append a worklog entry to YOUR current session
+loopbase cost                 # token + USD spend per session (memoized at index)
+loopbase insights             # automation CANDIDATES: repeated/expensive tool patterns, sequences, errors
 ```
 
 ## Workflows
@@ -109,6 +111,20 @@ don't guess turn numbers from memory. A `--turns` entry is anchored to that exac
 range and does **not** move the forward cursor (so normal `log` keeps working).
 Out-of-range turns are rejected with the valid count. Use it to retro-generate a
 worklog for an un-logged session, or to tag a sub-range more precisely.
+
+### 4. "What repetitive work is worth automating?"
+```
+loopbase insights                          # this project: ranked automation candidates
+loopbase insights --all --since 14d        # across every project, recent window
+loopbase insights --analyzer tool-ngram    # just the recurring call SEQUENCES
+loopbase insights --show-signature         # debug: see how raw calls collapse into buckets
+```
+Three analyzers over the stored tool-call facts: `tool-freq` (repeated/expensive
+single calls), `tool-ngram` (recurring multi-call sequences), `tool-errors`
+(tools that keep failing). Each row is ranked by frequency × token weight and
+carries up to 3 `session#turn` examples you open with `show --turn`. **These are
+candidates** — the framework finds *repeated and expensive*; whether something is
+*deterministic enough to script* is your call.
 
 ## Tips
 - IDs shown are short prefixes; `show` accepts any unambiguous prefix.
