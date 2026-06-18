@@ -2,7 +2,7 @@
 // its worklog entries nested. (PLAN.md → Command surface, Example I/O.)
 
 import { reindex } from "../indexer.ts";
-import { listSessions, countSubagents, worklogFor, recentWorklog } from "../queries.ts";
+import { listSessions, countSessions, countSubagents, worklogFor, recentWorklog, countWorklog } from "../queries.ts";
 import { resolveProject } from "../project.ts";
 import { parseDuration, relativeTime } from "../time.ts";
 import { emit, errUsage } from "../output.ts";
@@ -56,11 +56,13 @@ export function runList(inv: Invocation): void {
 
   const limit = typeof inv.flags.limit === "number" ? inv.flags.limit : 20;
   const agent = typeof inv.flags.agent === "string" ? inv.flags.agent : undefined;
+  const filter = { project, all, sinceMs, agent, limit };
+  const projectLabel = all ? "(all)" : project;
 
   // --logs → a flat, cross-session worklog feed (LOG.md-style), newest first.
   if (inv.flags.logs === true) {
     const now = Date.now();
-    const logs = recentWorklog({ project, all, sinceMs, agent, limit }).map((w) => ({
+    const logs = recentWorklog(filter).map((w) => ({
       id: w.id,
       session: shortId(w.session_native_id),
       agent: w.agent,
@@ -70,11 +72,12 @@ export function runList(inv: Invocation): void {
       ...(w.tags ? { tags: w.tags.split(",").map((t) => t.trim()).filter(Boolean) } : {}),
       msgs: w.msg_count,
     }));
-    emit({ project: all ? "(all)" : project, logs }, inv.mode, renderLogsText);
+    const more = moreSignal(logs.length, countWorklog(filter));
+    emit({ project: projectLabel, logs, ...(more ? { more } : {}) }, inv.mode, renderLogsText);
     return;
   }
 
-  const rows = listSessions({ project, all, sinceMs, agent, limit });
+  const rows = listSessions(filter);
   const now = Date.now();
 
   const sessions: OutSession[] = rows.map((r) => ({
@@ -88,7 +91,20 @@ export function runList(inv: Invocation): void {
     worklog: worklogFor(r.native_id).map(worklogView),
   }));
 
-  emit({ project: all ? "(all)" : project, sessions }, inv.mode, renderText);
+  const more = moreSignal(sessions.length, countSessions(filter));
+  emit({ project: projectLabel, sessions, ...(more ? { more } : {}) }, inv.mode, renderText);
+}
+
+// When the result hit `--limit` and more rows exist, tell the caller how to get
+// them (Principle 5: truncation should teach how to narrow). Absent = not truncated.
+interface MoreSignal {
+  shown: number;
+  total: number;
+  hint: string;
+}
+function moreSignal(shown: number, total: number): MoreSignal | undefined {
+  if (shown >= total) return undefined;
+  return { shown, total, hint: `${total - shown} more — raise --limit or narrow with --since` };
 }
 
 interface OutLog {
@@ -102,7 +118,7 @@ interface OutLog {
   msgs: number | null;
 }
 
-function renderLogsText(data: { project: string | null; logs: OutLog[] }): string {
+function renderLogsText(data: { project: string | null; logs: OutLog[]; more?: MoreSignal }): string {
   const lines: string[] = [`${data.project ?? "(all)"} — recent work`];
   if (data.logs.length === 0) lines.push("  (no worklog entries yet)");
   for (const l of data.logs) {
@@ -110,12 +126,13 @@ function renderLogsText(data: { project: string | null; logs: OutLog[] }): strin
     lines.push(`${l.when.padStart(8)}  ${l.id}  ${l.session} ${l.agent ?? "-"}  ${l.title}${tags}`);
     if (l.body) lines.push(`            ${l.body}`);
   }
+  if (data.more) lines.push(`… ${data.more.hint}`);
   lines.push("");
   lines.push(`dive: \`${BIN_NAME} show <session> --log <id>\``);
   return lines.join("\n");
 }
 
-function renderText(data: { project: string | null; sessions: OutSession[] }): string {
+function renderText(data: { project: string | null; sessions: OutSession[]; more?: MoreSignal }): string {
   const lines: string[] = [];
   lines.push(`${data.project ?? "(no project)"}`);
   if (data.sessions.length === 0) lines.push("  (no sessions)");
@@ -128,5 +145,6 @@ function renderText(data: { project: string | null; sessions: OutSession[] }): s
       lines.push(`  ${branch} ${w.id}  ${w.text}  (${w.msgs ?? "?"} msgs)`);
     });
   }
+  if (data.more) lines.push(`… ${data.more.hint}`);
   return lines.join("\n");
 }
