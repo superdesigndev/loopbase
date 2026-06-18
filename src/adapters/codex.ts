@@ -5,7 +5,6 @@
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
-import { Glob } from "bun";
 import { Database } from "bun:sqlite";
 import {
   type Adapter,
@@ -19,8 +18,10 @@ import {
   toEpochMs,
   ellipsize,
 } from "./types.ts";
+import { walkFilesResilient } from "./scan.ts";
 
 const ROOT = join(homedir(), ".codex", "sessions");
+const ROLLOUT = /^rollout-.*\.jsonl$/;
 
 export const codexAdapter: Adapter = {
   kind: "codex",
@@ -28,7 +29,9 @@ export const codexAdapter: Adapter = {
   enumerate(): SourceFile[] {
     if (!existsSync(ROOT)) return [];
     const files: SourceFile[] = [];
-    for (const rel of new Glob("**/rollout-*.jsonl").scanSync(ROOT)) {
+    // Resilient recursive walk (codex partitions by YYYY/MM/DD, so the flat
+    // scanProjectDirs doesn't fit) — one unreadable dir is skipped, not fatal.
+    for (const rel of walkFilesResilient(ROOT, (name) => ROLLOUT.test(name))) {
       const path = join(ROOT, rel);
       files.push({ path, mtimeMs: safeMtime(path), kind: "session" });
     }

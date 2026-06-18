@@ -12,7 +12,7 @@
 // to each one inside a try/catch, skipping the dirs that throw a permission
 // error. One bad dir no longer aborts the whole scan.
 
-import { readdirSync } from "node:fs";
+import { readdirSync, type Dirent } from "node:fs";
 import { join, posix } from "node:path";
 import { Glob } from "bun";
 
@@ -72,6 +72,39 @@ export function scanProjectDirs(
     } catch (err) {
       if (isSkippable(err)) continue; // skip this project dir, keep going
       throw err;
+    }
+  }
+  return out;
+}
+
+// Recursively walk `root`, collecting files whose basename satisfies `match`,
+// skipping any directory we can't read (same EACCES/EPERM rule as above). For
+// adapters whose tree ISN'T a flat list of project dirs — e.g. codex's
+// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` — so one unreadable directory
+// drops only that directory, not the whole scan (the same silent-total-loss
+// failure `scanProjectDirs` fixes for the flat layout). Yields paths relative to
+// `root` with posix `/` separators. `readdir` is injectable for tests.
+export function walkFilesResilient(
+  root: string,
+  match: (name: string) => boolean,
+  readdir: typeof readdirSync = readdirSync,
+): string[] {
+  const out: string[] = [];
+  const stack: string[] = [""]; // dirs relative to root; "" == root itself
+  while (stack.length > 0) {
+    const relDir = stack.pop()!;
+    const absDir = relDir ? join(root, relDir) : root;
+    let entries: Dirent[];
+    try {
+      entries = readdir(absDir, { withFileTypes: true });
+    } catch (err) {
+      if (isSkippable(err)) continue; // unreadable dir → skip, keep walking
+      throw err;
+    }
+    for (const e of entries) {
+      const rel = relDir ? posix.join(relDir, e.name) : e.name;
+      if (e.isDirectory()) stack.push(rel);
+      else if (e.isFile() && match(e.name)) out.push(rel);
     }
   }
   return out;

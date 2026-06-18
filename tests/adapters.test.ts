@@ -1,7 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { parseJsonl, extractText, toEpochMs, ellipsize, type Event } from "../src/adapters/types.ts";
 import { deriveFromEvents, cleanPrompt } from "../src/adapters/claude.ts";
-import { scanProjectDirs } from "../src/adapters/scan.ts";
+import { scanProjectDirs, walkFilesResilient } from "../src/adapters/scan.ts";
 import { resolveProject } from "../src/project.ts";
 
 describe("parseJsonl", () => {
@@ -147,5 +147,58 @@ describe("scanProjectDirs", () => {
     );
     expect(out).toEqual(["proj-ok/session-1/subagents/agent-2.jsonl"]);
     expect(out[0]!.split("/")[1]).toBe("session-1");
+  });
+});
+
+describe("walkFilesResilient", () => {
+  const D = (name: string) => ({ name, isDirectory: () => true, isFile: () => false });
+  const F = (name: string) => ({ name, isDirectory: () => false, isFile: () => true });
+  const isRollout = (n: string) => /^rollout-.*\.jsonl$/.test(n);
+
+  // Fake recursive readdir: a map of absolute dir → entries, or {code} to throw.
+  function fakeTree(tree: Record<string, ReturnType<typeof D>[] | { code: string }>) {
+    return ((dir: string, _opts?: unknown) => {
+      const v = tree[dir];
+      if (v && !Array.isArray(v)) {
+        const err = new Error(v.code) as NodeJS.ErrnoException;
+        err.code = v.code;
+        throw err;
+      }
+      return (v ?? []) as unknown as ReturnType<typeof import("node:fs").readdirSync>;
+    }) as unknown as typeof import("node:fs").readdirSync;
+  }
+
+  test("collects matching files recursively, ignoring non-matches", () => {
+    const rd = fakeTree({
+      "/root": [D("2026"), F("README.md")],
+      "/root/2026": [D("06")],
+      "/root/2026/06": [F("rollout-a.jsonl"), F("notes.txt")],
+    });
+    expect(walkFilesResilient("/root", isRollout, rd)).toEqual(["2026/06/rollout-a.jsonl"]);
+  });
+
+  test("skips an unreadable subdir (EACCES) but keeps walking the rest", () => {
+    const rd = fakeTree({
+      "/root": [D("2026")],
+      "/root/2026": [D("06"), D("locked")],
+      "/root/2026/06": [F("rollout-keep.jsonl")],
+      "/root/2026/locked": { code: "EACCES" },
+    });
+    expect(walkFilesResilient("/root", isRollout, rd)).toEqual(["2026/06/rollout-keep.jsonl"]);
+  });
+
+  test("re-throws a non-permission error (EMFILE)", () => {
+    const rd = fakeTree({ "/root": { code: "EMFILE" } });
+    expect(() => walkFilesResilient("/root", isRollout, rd)).toThrow("EMFILE");
+  });
+
+  test("re-throws ENOENT instead of skipping", () => {
+    const rd = fakeTree({ "/root": [D("x")], "/root/x": { code: "ENOENT" } });
+    expect(() => walkFilesResilient("/root", isRollout, rd)).toThrow("ENOENT");
+  });
+
+  test("returns [] when the root itself is unreadable (EACCES)", () => {
+    const rd = fakeTree({ "/root": { code: "EACCES" } });
+    expect(walkFilesResilient("/root", isRollout, rd)).toEqual([]);
   });
 });
