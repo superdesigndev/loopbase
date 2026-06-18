@@ -54,6 +54,27 @@ describe("argSig — signature normalization", () => {
     expect(a).toBe(b);
   });
 
+  test("Bash: curl skips -H value — gets the URL, not the Authorization header", () => {
+    const sig = argSig("Bash", { command: 'curl -s -H "Authorization: Bearer abc" https://api.ahrefs.com/v3/keywords' });
+    expect(sig).toBe("Bash:curl GET api.ahrefs.com/v3/keywords");
+    expect(sig).not.toContain("Authorization");
+  });
+
+  test("Bash: leading env assignments are stripped", () => {
+    expect(argSig("Bash", { command: "POSTHOG_KEY=x bun run script.ts" })).toBe("Bash:bun run");
+  });
+
+  test("Bash: heredoc collapses to one bucket (body is unique each call)", () => {
+    const a = argSig("Bash", { command: "python3 <<'PY'\nprint(1)\nPY" });
+    const b = argSig("Bash", { command: "python3 <<'PY'\nprint(2)\nPY" });
+    expect(a).toBe(b);
+    expect(a).toBe("Bash:python3 <<heredoc");
+  });
+
+  test("Bash: pipe chain signatures the first real command", () => {
+    expect(argSig("Bash", { command: "cat file.json | jq '.x'" })).toBe("Bash:cat file.json");
+  });
+
   test("MCP: name + sorted arg KEYS, never values", () => {
     const a = argSig("mcp__supabase__query", { sql: "select 1" });
     const b = argSig("mcp__supabase__query", { sql: "select 2 from t" });
@@ -158,8 +179,8 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     const ins = db.prepare(
       "INSERT INTO tool_call (session_native_id, seq, turn, name, arg_sig, est_tokens, has_error, error_class) VALUES (?,?,?,?,?,?,?,?)",
     );
-    // 4 identical Read calls → above the count floor of 3
-    for (let i = 0; i < 4; i++) ins.run("ses12345extra", i, 0, "Read", "Read:*.tsx", 500, 0, null);
+    // 4 identical automatable calls → above the count floor of 3
+    for (let i = 0; i < 4; i++) ins.run("ses12345extra", i, 0, "Bash", "Bash:composio run", 500, 0, null);
     return db;
   }
 
@@ -168,8 +189,9 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     const j = (await handle(new Request("http://x/api/insights?all=true&analyzer=tool-freq")).json()) as any;
     expect(j.analyzers["tool-freq"].length).toBe(1);
     const sig = j.analyzers["tool-freq"][0];
-    expect(sig.key).toBe("Read:*.tsx");
+    expect(sig.key).toBe("Bash:composio run");
     expect(sig.count).toBe(4);
+    expect(sig.project).toBe("proj"); // dominant repo attribution
     expect(sig.examples[0].session).toBe("ses12345"); // shortId = first 8 chars
   });
 

@@ -22,7 +22,15 @@ export interface InsightFilter {
   sinceMs?: number | null;
   agent?: string;
   top: number;
+  includeEdits?: boolean; // bring file-mutation tools back into the automation lens
 }
+
+// File-mutation tools are the SUBSTANCE of coding, not scriptable repetition —
+// excluded from the automation lens (tool-freq / tool-ngram) by default. Grep /
+// Glob stay: repeated searching signals a missing index/doc, its own candidate.
+const EDITOR_TOOLS = "'Read','Edit','Write','NotebookEdit'";
+// Pure no-op shell — never an automation candidate (and `echo` banners pollute).
+const NOOP_BASH_PREFIXES = ["Bash:echo", "Bash:true", "Bash:sleep", "Bash::", "Bash:printf", "Bash:cd "];
 
 // A ranked candidate. `examples` carry the full session id + turn so the caller
 // can shorten it and feed `show --turn`. Candidates only — the deterministic /
@@ -34,8 +42,15 @@ export interface Signal {
   count: number;
   tokens: number;
   sessions: number;
+  project: string | null; // dominant repo for this bucket (basename), so --all is legible
   examples: { session: string; turn: number | null }[];
   sample?: string; // optional display extra (sample error, member tools, …)
+}
+
+function projectBase(p: string | null): string | null {
+  if (!p) return null;
+  const x = p.replace(/\/+$/, "").split("/");
+  return x[x.length - 1] || p;
 }
 
 interface FactRow {
@@ -49,63 +64,90 @@ interface FactRow {
   error_class: string | null;
 }
 
-// Build the shared scope WHERE (project / since / agent) over a `tool_call tc`
-// joined to `sessions s`. Returns the clause + params.
-function scope(f: InsightFilter): { where: string; params: Record<string, string | number> } {
+// Scope conditions (project / since / agent) for given session/tool_call alias
+// names — reused for the main query and the dominant-project subquery.
+function scopeConds(f: InsightFilter, sAlias: string): string[] {
   const parts: string[] = [];
+  if (!f.all) parts.push(`${sAlias}.project = $project`);
+  if (f.sinceMs != null) parts.push(`${sAlias}.last_ts >= $cutoff`);
+  if (f.agent) parts.push(`${sAlias}.agent = $agent`);
+  return parts;
+}
+
+function scopeParams(f: InsightFilter): Record<string, string | number> {
   const params: Record<string, string | number> = {};
-  if (!f.all) {
-    parts.push("s.project = $project");
-    params.$project = f.project ?? " none";
-  }
-  if (f.sinceMs != null) {
-    parts.push("s.last_ts >= $cutoff");
-    params.$cutoff = f.sinceMs;
-  }
-  if (f.agent) {
-    parts.push("s.agent = $agent");
-    params.$agent = f.agent;
-  }
-  return { where: parts.length ? " WHERE " + parts.join(" AND ") : "", params };
+  if (!f.all) params.$project = f.project ?? " none";
+  if (f.sinceMs != null) params.$cutoff = f.sinceMs;
+  if (f.agent) params.$agent = f.agent;
+  return params;
+}
+
+// The automation-lens conditions on `tc`: drop file-mutation tools (unless
+// includeEdits) and pure no-op shell. `candidate=false` (errors lens) keeps
+// editors but still drops no-ops.
+function candidateConds(f: InsightFilter, candidate: boolean): string[] {
+  const parts: string[] = [];
+  if (candidate && !f.includeEdits) parts.push(`tc.name NOT IN (${EDITOR_TOOLS})`);
+  for (const pre of NOOP_BASH_PREFIXES) parts.push(`tc.arg_sig NOT LIKE '${pre}%'`);
+  return parts;
+}
+
+// Build the WHERE for the main analyzer query: scope + candidate lens.
+function whereFor(f: InsightFilter, candidate: boolean): { where: string; params: Record<string, string | number> } {
+  const parts = [...scopeConds(f, "s"), ...candidateConds(f, candidate)];
+  return { where: parts.length ? " WHERE " + parts.join(" AND ") : "", params: scopeParams(f) };
+}
+
+// Dominant-project subquery for a (name, arg_sig) bucket, scoped the same way.
+function topProjectSub(f: InsightFilter): string {
+  const sub = scopeConds(f, "s2");
+  return (
+    "(SELECT s2.project FROM tool_call t2 JOIN sessions s2 ON s2.native_id = t2.session_native_id" +
+    " WHERE t2.name = tc.name AND t2.arg_sig = tc.arg_sig" +
+    (sub.length ? " AND " + sub.join(" AND ") : "") +
+    " GROUP BY s2.project ORDER BY COUNT(*) DESC LIMIT 1)"
+  );
 }
 
 // Up to MAX_EXAMPLES distinct-session examples for a (name, arg_sig) bucket,
 // preferring higher-token calls (the worst offenders) as the illustration.
 function examplesForSig(f: InsightFilter, name: string, argSig: string, onlyErrors = false): Signal["examples"] {
   const db = openDb();
-  const s = scope(f);
+  const conds = scopeConds(f, "s");
   const sql =
     "SELECT tc.session_native_id AS session, tc.turn AS turn, MAX(tc.est_tokens) AS w" +
     " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
-    s.where +
-    (s.where ? " AND" : " WHERE") +
-    " tc.name = $n AND tc.arg_sig = $sig" +
+    " WHERE tc.name = $n AND tc.arg_sig = $sig" +
     (onlyErrors ? " AND tc.has_error = 1" : "") +
+    (conds.length ? " AND " + conds.join(" AND ") : "") +
     " GROUP BY tc.session_native_id ORDER BY w DESC LIMIT $cap";
   return db
     .query(sql)
-    .all({ ...s.params, $n: name, $sig: argSig, $cap: MAX_EXAMPLES } as Record<string, string | number>)
+    .all({ ...scopeParams(f), $n: name, $sig: argSig, $cap: MAX_EXAMPLES } as Record<string, string | number>)
     .map((r) => ({ session: (r as any).session as string, turn: (r as any).turn as number | null }));
 }
 
-// tool-freq: "what did we do over and over." GROUP BY (name, arg_sig).
+// tool-freq: "what did we do over and over." GROUP BY (name, arg_sig), through
+// the automation lens (file-mutation tools excluded unless includeEdits).
 export function toolFreq(f: InsightFilter): Signal[] {
   const db = openDb();
-  const s = scope(f);
+  const w = whereFor(f, true);
   const sql =
     "SELECT tc.name, tc.arg_sig," +
     " COUNT(*) AS count, SUM(tc.est_tokens) AS tokens," +
-    " COUNT(DISTINCT tc.session_native_id) AS sessions" +
+    " COUNT(DISTINCT tc.session_native_id) AS sessions," +
+    " " + topProjectSub(f) + " AS project" +
     " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
-    s.where +
+    w.where +
     " GROUP BY tc.name, tc.arg_sig HAVING count >= $floor" +
     " ORDER BY tokens DESC, count DESC LIMIT $top";
-  const rows = db.query(sql).all({ ...s.params, $floor: MIN_COUNT, $top: f.top } as Record<string, string | number>) as {
+  const rows = db.query(sql).all({ ...w.params, $floor: MIN_COUNT, $top: f.top } as Record<string, string | number>) as {
     name: string;
     arg_sig: string;
     count: number;
     tokens: number;
     sessions: number;
+    project: string | null;
   }[];
   return rows.map((r) => ({
     analyzer: "tool-freq",
@@ -114,32 +156,37 @@ export function toolFreq(f: InsightFilter): Signal[] {
     count: r.count,
     tokens: r.tokens,
     sessions: r.sessions,
+    project: projectBase(r.project),
     examples: examplesForSig(f, r.name, r.arg_sig),
   }));
 }
 
-// tool-errors: "what keeps failing." Same facts, filtered to has_error.
+// tool-errors: "what keeps failing." Same facts, filtered to has_error. Keeps
+// editor tools (a recurring "File has not been read yet" Edit IS a useful
+// reliability signal); only no-op shell is dropped.
 export function toolErrors(f: InsightFilter): Signal[] {
   const db = openDb();
-  const s = scope(f);
+  const w = whereFor(f, false);
   const sql =
     "SELECT tc.name, tc.arg_sig," +
     " COUNT(*) AS count, SUM(tc.est_tokens) AS tokens," +
     " COUNT(DISTINCT tc.session_native_id) AS sessions," +
+    " " + topProjectSub(f) + " AS project," +
     " (SELECT error_class FROM tool_call e WHERE e.name = tc.name AND e.arg_sig = tc.arg_sig AND e.has_error = 1 AND e.error_class IS NOT NULL" +
     "   GROUP BY e.error_class ORDER BY COUNT(*) DESC LIMIT 1) AS sample" +
     " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
-    s.where +
-    (s.where ? " AND" : " WHERE") +
+    w.where +
+    (w.where ? " AND" : " WHERE") +
     " tc.has_error = 1" +
     " GROUP BY tc.name, tc.arg_sig HAVING count >= $floor" +
     " ORDER BY count DESC, tokens DESC LIMIT $top";
-  const rows = db.query(sql).all({ ...s.params, $floor: MIN_COUNT, $top: f.top } as Record<string, string | number>) as {
+  const rows = db.query(sql).all({ ...w.params, $floor: MIN_COUNT, $top: f.top } as Record<string, string | number>) as {
     name: string;
     arg_sig: string;
     count: number;
     tokens: number;
     sessions: number;
+    project: string | null;
     sample: string | null;
   }[];
   return rows.map((r) => ({
@@ -149,6 +196,7 @@ export function toolErrors(f: InsightFilter): Signal[] {
     count: r.count,
     tokens: r.tokens,
     sessions: r.sessions,
+    project: projectBase(r.project),
     examples: examplesForSig(f, r.name, r.arg_sig, true),
     ...(r.sample ? { sample: r.sample } : {}),
   }));
@@ -161,18 +209,18 @@ export function toolErrors(f: InsightFilter): Signal[] {
 // Read → Read) are dropped as flow noise.
 export function toolNgram(f: InsightFilter): Signal[] {
   const db = openDb();
-  const s = scope(f);
+  const w = whereFor(f, true); // automation lens: editors/no-ops excluded
   const rows = db
     .query(
-      "SELECT tc.session_native_id, tc.seq, tc.turn, tc.name, tc.arg_sig, tc.est_tokens, tc.has_error, tc.error_class" +
+      "SELECT tc.session_native_id, tc.seq, tc.turn, tc.name, tc.arg_sig, tc.est_tokens, tc.has_error, tc.error_class, s.project" +
         " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
-        s.where +
+        w.where +
         " ORDER BY tc.session_native_id, tc.seq",
     )
-    .all(s.params) as FactRow[];
+    .all(w.params) as (FactRow & { project: string | null })[];
 
   // Bucket facts by session, preserving order.
-  const bySession = new Map<string, FactRow[]>();
+  const bySession = new Map<string, (FactRow & { project: string | null })[]>();
   for (const r of rows) {
     let arr = bySession.get(r.session_native_id);
     if (!arr) bySession.set(r.session_native_id, (arr = []));
@@ -183,6 +231,7 @@ export function toolNgram(f: InsightFilter): Signal[] {
     count: number;
     tokens: number;
     sessions: Set<string>;
+    projects: Map<string, number>; // project → occurrences, for the dominant repo
     examples: { session: string; turn: number | null; w: number }[];
   }
   const grams = new Map<string, Acc>();
@@ -194,10 +243,12 @@ export function toolNgram(f: InsightFilter): Signal[] {
       const key = sigs.join(" → ");
       const tok = win.reduce((a, c) => a + c.est_tokens, 0);
       let acc = grams.get(key);
-      if (!acc) grams.set(key, (acc = { count: 0, tokens: 0, sessions: new Set(), examples: [] }));
+      if (!acc) grams.set(key, (acc = { count: 0, tokens: 0, sessions: new Set(), projects: new Map(), examples: [] }));
       acc.count++;
       acc.tokens += tok;
       acc.sessions.add(sid);
+      const proj = win[0]!.project;
+      if (proj) acc.projects.set(proj, (acc.projects.get(proj) ?? 0) + 1);
       acc.examples.push({ session: sid, turn: win[0]!.turn, w: tok });
     }
   }
@@ -212,6 +263,7 @@ export function toolNgram(f: InsightFilter): Signal[] {
       .filter((e) => (seen.has(e.session) ? false : (seen.add(e.session), true)))
       .slice(0, MAX_EXAMPLES)
       .map((e) => ({ session: e.session, turn: e.turn }));
+    const topProj = [...acc.projects.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
     out.push({
       analyzer: "tool-ngram",
       key,
@@ -219,6 +271,7 @@ export function toolNgram(f: InsightFilter): Signal[] {
       count: acc.count,
       tokens: acc.tokens,
       sessions: acc.sessions.size,
+      project: projectBase(topProj),
       examples,
     });
   }

@@ -119,6 +119,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "since", type: "string", desc: "Only sessions updated within this window, e.g. 24h, 7d." },
       { name: "agent", type: "enum", enumValues: ["claude", "codex", "pi"], desc: "Filter by agent." },
       { name: "top", type: "int", default: 20, desc: "Max candidates per analyzer." },
+      { name: "include-edits", type: "bool", default: false, desc: "Include file-mutation tools (Read/Edit/Write) in the automation lens — off by default (they're the substance of coding, not scriptable)." },
       { name: "show-signature", type: "bool", default: false, desc: "Debug: print raw tool call -> normalized signature, to eyeball collapse quality." },
     ],
   },

@@ -31,7 +31,7 @@ export function runInsights(inv: Invocation): void {
     sinceMs = Date.now() - d;
   }
 
-  const filter: InsightFilter = { project, all, sinceMs, agent, top };
+  const filter: InsightFilter = { project, all, sinceMs, agent, top, includeEdits: inv.flags["include-edits"] === true };
 
   // Debug: eyeball signature collapse instead of running analyzers.
   if (inv.flags["show-signature"] === true) {
@@ -67,6 +67,7 @@ function signalView(s: Signal) {
     count: s.count,
     tokens: s.tokens,
     sessions: s.sessions,
+    ...(s.project ? { project: s.project } : {}),
     ...(s.sample ? { sample: s.sample } : {}),
     examples: s.examples.map((e) => ({ session: shortId(e.session), turn: e.turn })),
   };
@@ -88,7 +89,8 @@ function renderText(project: string | null, groups: Record<string, ReturnType<ty
     for (const r of rows) {
       const ex = r.examples.map((e) => `${e.session}${e.turn != null ? `#${e.turn}` : ""}`).join(" ");
       const extra = r.sample ? `  «${r.sample}»` : "";
-      lines.push(`  ${k(r.count).padStart(5)}×  ${k(r.tokens).padStart(6)} tok  ${r.sessions} sess  ${r.key}${extra}`);
+      const proj = r.project ? `  [${r.project}]` : "";
+      lines.push(`  ${k(r.count).padStart(5)}×  ${k(r.tokens).padStart(6)} tok  ${r.sessions} sess${proj}  ${r.key}${extra}`);
       if (ex) lines.push(`         e.g. ${BIN_NAME} show ${ex.split(" ")[0]!.replace("#", " --turn ")}`);
     }
   }

@@ -37,7 +37,9 @@ function step(id: string, name: string, input: unknown, result: string, isError 
   ];
 }
 
-// The shared A→B→C sequence, repeated `reps` times, with unique ids per session.
+// The shared A→B→C sequence of AUTOMATABLE tools (curl → mcp query → gh pr),
+// repeated `reps` times, plus a couple editor calls (for the --include-edits
+// path). Unique ids per session.
 function sequenceLines(sid: string, reps: number): string[] {
   const lines: string[] = [
     JSON.stringify({ type: "user", sessionId: sid, cwd: PROJ, gitBranch: "main", timestamp: "2026-06-17T00:00:00.000Z", message: { role: "user", content: "build the prompt library item" } }),
@@ -45,9 +47,11 @@ function sequenceLines(sid: string, reps: number): string[] {
   let i = 0;
   for (let r = 0; r < reps; r++) {
     lines.push(...step(`${sid}-a${r}`, "Bash", { command: `curl -X POST https://api.superdesign.dev/v1/prompts -d @body${i++}.json` }, "ok " + "x".repeat(40)));
-    lines.push(...step(`${sid}-b${r}`, "Read", { file_path: `/repo/src/Component${i++}.tsx` }, "file contents ".repeat(20)));
-    lines.push(...step(`${sid}-c${r}`, "mcp__supabase__query", { sql: `select ${i++} from prompts` }, "rows ".repeat(10)));
+    lines.push(...step(`${sid}-b${r}`, "mcp__supabase__query", { sql: `select ${i++} from prompts` }, "rows ".repeat(10)));
+    lines.push(...step(`${sid}-c${r}`, "Bash", { command: `gh pr create --title "item ${i++}"` }, "https://github.com/x/pr/1"));
   }
+  // editor calls — excluded from the automation lens by default
+  for (let r = 0; r < reps; r++) lines.push(...step(`${sid}-d${r}`, "Read", { file_path: `/repo/src/Component${i++}.tsx` }, "file contents ".repeat(20)));
   return lines;
 }
 
@@ -78,23 +82,30 @@ describe("insights end-to-end", () => {
     expect(r.updated).toBeGreaterThanOrEqual(2);
   });
 
-  test("Phase 3: tool-freq surfaces the repeated buckets, deduped by signature", () => {
+  test("Phase 3: tool-freq surfaces the automatable buckets, deduped by signature", () => {
     const r = run(["insights", "--analyzer", "tool-freq", "--path", PROJ]);
     const keys = r.analyzers["tool-freq"].map((s: any) => s.key);
-    // each of the 3 sig kinds appears 4× across the two sessions (> floor of 3)
+    // each automatable sig appears 4× across the two sessions (> floor of 3)
     expect(keys).toContain("Bash:curl POST api.superdesign.dev/v1/prompts");
-    expect(keys).toContain("Read:*.tsx");
     expect(keys).toContain("mcp__supabase__query(sql)");
-    const readBucket = r.analyzers["tool-freq"].find((s: any) => s.key === "Read:*.tsx");
-    expect(readBucket.count).toBe(4);
-    expect(readBucket.sessions).toBe(2);
-    expect(readBucket.examples.length).toBeLessThanOrEqual(3);
-    expect(readBucket.examples[0].session.length).toBe(8); // short id, show-resolvable
+    expect(keys).toContain("Bash:gh pr");
+    const curlBucket = r.analyzers["tool-freq"].find((s: any) => s.key === "Bash:curl POST api.superdesign.dev/v1/prompts");
+    expect(curlBucket.count).toBe(4);
+    expect(curlBucket.sessions).toBe(2);
+    expect(curlBucket.project).toBe("lb-insights-proj"); // dominant repo attribution
+    expect(curlBucket.examples.length).toBeLessThanOrEqual(3);
+    expect(curlBucket.examples[0].session.length).toBe(8); // short id, show-resolvable
   });
 
-  test("Phase 3: count floor drops one-offs", () => {
-    // The psql error sig only appears in session 1; as a non-error frequency it's
-    // 3 calls → exactly at the floor, so it MAY appear. A truly rare sig wouldn't.
+  test("Phase 3: file-mutation tools are excluded from the automation lens by default", () => {
+    const def = run(["insights", "--analyzer", "tool-freq", "--path", PROJ]);
+    expect(def.analyzers["tool-freq"].map((s: any) => s.key)).not.toContain("Read:*.tsx");
+    // --include-edits brings them back
+    const inc = run(["insights", "--analyzer", "tool-freq", "--path", PROJ, "--include-edits"]);
+    expect(inc.analyzers["tool-freq"].map((s: any) => s.key)).toContain("Read:*.tsx");
+  });
+
+  test("Phase 3: count floor + no-op drop", () => {
     const r = run(["insights", "--analyzer", "tool-freq", "--path", PROJ]);
     for (const s of r.analyzers["tool-freq"]) expect(s.count).toBeGreaterThanOrEqual(3);
   });
@@ -113,10 +124,11 @@ describe("insights end-to-end", () => {
     const grams = r.analyzers["tool-ngram"];
     expect(grams.length).toBeGreaterThanOrEqual(1);
     const top = grams[0];
-    // the A→B→C motif, recurring in BOTH sessions
-    expect(top.key).toBe("Bash:curl POST api.superdesign.dev/v1/prompts → Read:*.tsx → mcp__supabase__query(sql)");
+    // the A→B→C motif (automatable tools), recurring in BOTH sessions
+    expect(top.key).toBe("Bash:curl POST api.superdesign.dev/v1/prompts → mcp__supabase__query(sql) → Bash:gh pr");
     expect(top.sessions).toBe(2);
     expect(top.count).toBeGreaterThanOrEqual(3);
+    expect(top.project).toBe("lb-insights-proj");
   });
 
   test("default runs all analyzers", () => {

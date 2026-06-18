@@ -117,14 +117,17 @@ worklog for an un-logged session, or to tag a sub-range more precisely.
 loopbase insights                          # this project: ranked automation candidates
 loopbase insights --all --since 14d        # across every project, recent window
 loopbase insights --analyzer tool-ngram    # just the recurring call SEQUENCES
+loopbase insights --include-edits          # also count Read/Edit/Write (off by default)
 loopbase insights --show-signature         # debug: see how raw calls collapse into buckets
 ```
 Three analyzers over the stored tool-call facts: `tool-freq` (repeated/expensive
 single calls), `tool-ngram` (recurring multi-call sequences), `tool-errors`
-(tools that keep failing). Each row is ranked by frequency × token weight and
-carries up to 3 `session#turn` examples you open with `show --turn`. **These are
-candidates** — the framework finds *repeated and expensive*; whether something is
-*deterministic enough to script* is your call.
+(tools that keep failing). Each row is ranked by frequency × token weight, tagged
+with its **dominant repo**, and carries up to 3 `session#turn` examples you open
+with `show --turn`. By default the automation lens **excludes file-mutation
+tools** (Read/Edit/Write — the substance of coding, not scriptable; Grep/Glob
+stay). **These are candidates** — the framework finds *repeated and expensive*;
+whether something is *deterministic enough to script* is your call.
 
 ## Tips
 - IDs shown are short prefixes; `show` accepts any unambiguous prefix.

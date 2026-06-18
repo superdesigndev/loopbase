@@ -53,42 +53,84 @@ function fileExtOrDir(p: string): string {
 // `cd "$REPO" && git commit`). Signaturing the `cd` would collapse every command
 // run from a given dir into one useless bucket, so we skip past these.
 const SETUP_HEADS = new Set(["cd", "export", "source", ".", "set", "pushd", "popd", "env"]);
+// Leading `FOO=bar` environment assignments before the real command.
+const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// curl/wget flags that consume the NEXT token as their value — so we don't
+// mistake `-H "Authorization: …"`'s value for the URL.
+const CURL_VALUE_FLAGS = new Set([
+  "-H", "--header", "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+  "-F", "--form", "-X", "--request", "-u", "--user", "-A", "--user-agent", "-e",
+  "--referer", "-b", "--cookie", "-o", "--output", "-w", "--write-out", "-T",
+  "--upload-file", "--url", "-H,",
+]);
 
-// Signature for a `Bash` command: argv0 + first non-flag subtoken, EXCEPT
-// curl/wget/http where we keep method + host+path so distinct endpoints don't
-// over-collapse into one "curl" bucket. Leading setup segments of a &&/; chain
-// (cd, export, …) are dropped so we signature the real command.
+function unquote(s: string): string {
+  return s.replace(/^['"]+/, "").replace(/['"]+$/, "");
+}
+
+// The command head of one chain segment, after dropping env assignments.
+function segmentHead(seg: string): string {
+  const toks = seg.trim().split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < toks.length && ENV_ASSIGN.test(toks[i]!)) i++;
+  return i < toks.length ? baseName(unquote(toks[i]!)) : "";
+}
+
+function curlSig(argv0: string, toks: string[]): string {
+  let method = "GET";
+  let url = "";
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i]!;
+    if (t === "-X" || t === "--request") {
+      if (toks[i + 1]) method = unquote(toks[++i]!).toUpperCase();
+      continue;
+    }
+    if (CURL_VALUE_FLAGS.has(t)) {
+      i++; // skip the flag AND its value (the header/body/etc.)
+      continue;
+    }
+    if (t.startsWith("-")) continue; // other valueless flags
+    if (!url) {
+      const c = unquote(t);
+      if (/^https?:\/\//.test(c) || c.includes("/") || c.includes(".")) url = c; // url-ish
+    }
+  }
+  const hostPath = url.replace(/^https?:\/\//, "").split(/[?#]/)[0]!.replace(/\/+$/, "");
+  return `Bash:${argv0}${url ? ` ${method} ${hostPath}` : ""}`;
+}
+
+// Signature for a `Bash` command: argv0 + first non-flag subtoken, with special
+// handling so the bucket reflects the real work:
+//   • skip leading setup segments of a &&/;/| chain (cd, export, …),
+//   • strip leading `FOO=bar` env assignments,
+//   • curl/wget → method + host+path (skipping flag values like -H),
+//   • heredocs (`python3 <<'PY'`) collapse to one bucket (the body is unique).
 function bashSig(cmd: string): string {
-  // Pick the first chain segment whose head isn't a setup/no-op command.
-  const segments = cmd.split(/&&|;/).map((s) => s.trim()).filter(Boolean);
+  // First meaningful chain segment (skip cd/export/... setup heads).
+  const segments = cmd.split(/&&|\|\||;|\|/).map((s) => s.trim()).filter(Boolean);
   const target =
-    segments.find((seg) => !SETUP_HEADS.has(baseName(seg.split(/\s+/)[0] ?? ""))) ??
+    segments.find((seg) => {
+      const h = segmentHead(seg);
+      return h && !SETUP_HEADS.has(h);
+    }) ??
     segments[segments.length - 1] ??
     cmd;
 
-  const tokens = target.trim().split(/\s+/).filter(Boolean);
+  let tokens = target.trim().split(/\s+/).filter(Boolean);
+  while (tokens.length && ENV_ASSIGN.test(tokens[0]!)) tokens.shift(); // drop env prefix
   if (tokens.length === 0) return "Bash";
-  const argv0 = baseName(tokens[0]!);
+  const argv0 = baseName(unquote(tokens[0]!));
 
   if (argv0 === "curl" || argv0 === "wget" || argv0 === "http" || argv0 === "https") {
-    let method = "GET";
-    let url = "";
-    for (let i = 1; i < tokens.length; i++) {
-      const t = tokens[i]!;
-      if ((t === "-X" || t === "--request") && tokens[i + 1]) method = tokens[++i]!.toUpperCase();
-      else if (/^https?:\/\//.test(t)) url = t;
-      else if (!url && !t.startsWith("-")) url = t; // bare host/path argument
-    }
-    const hostPath = url
-      .replace(/^https?:\/\//, "")
-      .split(/[?#]/)[0]! // drop query/fragment
-      .replace(/\/+$/, "");
-    return stripNoise(`Bash:${argv0} ${method} ${hostPath}`);
+    return stripNoise(curlSig(argv0, tokens));
   }
 
-  // Generic: argv0 + first non-flag subtoken (git commit, playwright screenshot).
-  const sub = tokens.slice(1).find((t) => !t.startsWith("-"));
-  return stripNoise(`Bash:${argv0}${sub ? " " + sub : ""}`);
+  // Heredoc: the script body is unique each call; the command is the signal.
+  if (/<<-?\s*['"]?[A-Za-z0-9_]+/.test(target)) return stripNoise(`Bash:${argv0} <<heredoc`);
+
+  // Generic: argv0 + first non-flag, non-redirect subtoken (git commit, …).
+  const sub = tokens.slice(1).find((t) => !t.startsWith("-") && !ENV_ASSIGN.test(t) && !/^[<>|]/.test(t));
+  return stripNoise(`Bash:${argv0}${sub ? " " + unquote(sub) : ""}`);
 }
 
 const FILE_TOOLS = new Set(["Read", "Edit", "Write", "NotebookEdit"]);

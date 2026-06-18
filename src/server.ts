@@ -64,7 +64,7 @@ export function handle(req: Request): Response {
     if (process.env.LB_SKIP_REINDEX !== "1") reindex();
     const lf = filterFromUrl(u);
     const top = Math.min(100, Math.max(1, Number(u.searchParams.get("top") ?? "20") || 20));
-    const f: InsightFilter = { project: lf.project, all: lf.all, sinceMs: lf.sinceMs, agent: lf.agent, top };
+    const f: InsightFilter = { project: lf.project, all: lf.all, sinceMs: lf.sinceMs, agent: lf.agent, top, includeEdits: u.searchParams.get("include-edits") === "true" };
     const requested = u.searchParams.get("analyzer");
     const names = requested ? requested.split(",").map((s) => s.trim()).filter((n) => ANALYZERS[n]) : ANALYZER_NAMES;
     const analyzers: Record<string, unknown[]> = {};
