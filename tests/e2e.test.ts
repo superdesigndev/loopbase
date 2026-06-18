@@ -87,6 +87,24 @@ describe("end-to-end (cli over a fixture session)", () => {
     expect(r.sessions).toBeUndefined(); // it's the feed, not the session list
   });
 
+  test("list signals truncation via `more` (and omits it when not truncated)", () => {
+    // default limit easily holds the single fixture session → not truncated.
+    const full = run(["list", "--path", PROJ]);
+    expect(full.sessions.length).toBe(1);
+    expect(full.more).toBeUndefined();
+    // force truncation: limit below the total → `more` names how many remain.
+    const capped = run(["list", "--path", PROJ, "--limit", "0"]);
+    expect(capped.sessions.length).toBe(0);
+    expect(capped.more).toMatchObject({ shown: 0, total: 1 });
+    expect(capped.more.hint).toContain("--limit");
+  });
+
+  test("list --logs also signals truncation", () => {
+    const capped = run(["list", "--logs", "--path", PROJ, "--limit", "0"]);
+    expect(capped.logs.length).toBe(0);
+    expect(capped.more).toMatchObject({ shown: 0, total: 1 });
+  });
+
   test("search finds content and returns the turn handle", () => {
     const r = run(["search", "first task", "--path", PROJ]);
     expect(r.matches.length).toBeGreaterThanOrEqual(1);
