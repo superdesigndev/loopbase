@@ -17,8 +17,11 @@ export const BIN_NAME = "loopbase";
 // (v3: codex semantic titles + AGENTS.md skip. v4: token + cost tables.
 // v5: cost accuracy — dedup duplicate usage rows + count subagent/workflow spend.
 // v6: tool_call fact table for insights. v7: + detail sub-cluster column.
-// v8: soft-error reclassification (read-before-edit / cancellations not errors).)
-export const SCHEMA_VERSION = 8;
+// v8: soft-error reclassification (read-before-edit / cancellations not errors).
+// v9: + msg_offset on tool_call → real USD attribution per bucket.
+// v10: dedup re-logged assistant messages in extraction (accurate counts + cost join).
+// v11: cost join on message id (dedup_key) not byte offset — handles streaming partials.)
+export const SCHEMA_VERSION = 11;
 
 import { homedir } from "node:os";
 import { join } from "node:path";

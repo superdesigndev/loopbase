@@ -49,6 +49,7 @@ export interface Signal {
   score: number;
   count: number;
   tokens: number;
+  usd: number | null; // real attributed spend (memoized cost); null = unpriced
   sessions: number;
   project: string | null; // dominant repo for this bucket (basename), so --all is legible
   details?: { key: string; count: number }[]; // top sub-clusters (slug/table/shape)
@@ -112,16 +113,30 @@ function whereFor(f: InsightFilter, candidate: boolean): { where: string; params
   return { where: parts.length ? " WHERE " + parts.join(" AND ") : "", params: scopeParams(f) };
 }
 
-// Dominant-project subquery for a (name, arg_sig) bucket, scoped the same way.
-function topProjectSub(f: InsightFilter): string {
-  const sub = scopeConds(f, "s2");
-  return (
-    "(SELECT s2.project FROM tool_call t2 JOIN sessions s2 ON s2.native_id = t2.session_native_id" +
-    " WHERE t2.name = tc.name AND t2.arg_sig = tc.arg_sig" +
-    (sub.length ? " AND " + sub.join(" AND ") : "") +
-    " GROUP BY s2.project ORDER BY COUNT(*) DESC LIMIT 1)"
-  );
+// Dominant repo for a (name, arg_sig) bucket — a small per-bucket query (run
+// only for the ≤top returned rows), kept out of the main aggregate for clarity.
+function topProjectFor(f: InsightFilter, name: string, argSig: string): string | null {
+  const db = openDb();
+  const conds = scopeConds(f, "s");
+  const sql =
+    "SELECT s.project AS p FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
+    " WHERE tc.name = $n AND tc.arg_sig = $sig" +
+    (conds.length ? " AND " + conds.join(" AND ") : "") +
+    " GROUP BY s.project ORDER BY COUNT(*) DESC LIMIT 1";
+  const row = db.query(sql).get({ ...scopeParams(f), $n: name, $sig: argSig } as Record<string, string | number>) as { p: string | null } | null;
+  return projectBase(row?.p ?? null);
 }
+
+// Per-tool-call attributed USD as a SQL fragment: the issuing assistant
+// message's memoized cost, SPLIT across the tool calls in that message (so a
+// message with 3 parallel calls doesn't triple-count). Joined on the message's
+// stable id (dedup_key), NOT byte offset — the harness logs streaming partials
+// of one message at several offsets (usage on one, the tool_use on another), so
+// only the id is a reliable link. Null when unpriced / no id.
+const ATTR_USD =
+  "m.total_usd * 1.0 / COUNT(*) OVER (PARTITION BY tc.session_native_id, tc.dedup_key)";
+const COST_JOIN =
+  " LEFT JOIN message_tokens m ON m.session_native_id = tc.session_native_id AND m.dedup_key = tc.dedup_key AND tc.dedup_key IS NOT NULL";
 
 // Up to MAX_EXAMPLES distinct-session examples for a (name, arg_sig) bucket,
 // preferring higher-token calls (the worst offenders) as the illustration.
@@ -167,31 +182,36 @@ export function detailsFor(f: InsightFilter, name: string, argSig: string, limit
 export function toolFreq(f: InsightFilter): Signal[] {
   const db = openDb();
   const w = whereFor(f, true);
+  // CTE attributes real USD per call (split across a message's tool calls), then
+  // we roll up per bucket. Rank by real spend; unpriced buckets sort last.
   const sql =
-    "SELECT tc.name, tc.arg_sig," +
-    " COUNT(*) AS count, SUM(tc.est_tokens) AS tokens," +
-    " COUNT(DISTINCT tc.session_native_id) AS sessions," +
-    " " + topProjectSub(f) + " AS project" +
-    " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
+    "WITH attr AS (" +
+    "  SELECT tc.name AS name, tc.arg_sig AS arg_sig, tc.est_tokens AS est, tc.session_native_id AS sid," +
+    "    " + ATTR_USD + " AS usd" +
+    "  FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" + COST_JOIN +
     w.where +
-    " GROUP BY tc.name, tc.arg_sig HAVING count >= $floor" +
-    " ORDER BY tokens DESC, count DESC LIMIT $top";
+    ")" +
+    " SELECT name, arg_sig, COUNT(*) AS count, SUM(est) AS tokens, SUM(usd) AS usd," +
+    " COUNT(DISTINCT sid) AS sessions FROM attr" +
+    " GROUP BY name, arg_sig HAVING count >= $floor" +
+    " ORDER BY (usd IS NULL), usd DESC, tokens DESC LIMIT $top";
   const rows = db.query(sql).all({ ...w.params, $floor: MIN_COUNT, $top: f.top } as Record<string, string | number>) as {
     name: string;
     arg_sig: string;
     count: number;
     tokens: number;
+    usd: number | null;
     sessions: number;
-    project: string | null;
   }[];
   return rows.map((r) => ({
     analyzer: "tool-freq",
     key: r.arg_sig,
-    score: r.tokens, // total est tokens = count × avg-per-call
+    score: r.usd ?? 0,
     count: r.count,
     tokens: r.tokens,
+    usd: r.usd,
     sessions: r.sessions,
-    project: projectBase(r.project),
+    project: topProjectFor(f, r.name, r.arg_sig),
     details: detailsFor(f, r.name, r.arg_sig, MAX_DETAILS),
     examples: examplesForSig(f, r.name, r.arg_sig),
   }));
@@ -203,40 +223,47 @@ export function toolFreq(f: InsightFilter): Signal[] {
 export function toolErrors(f: InsightFilter): Signal[] {
   const db = openDb();
   const w = whereFor(f, false);
+  const errWhere = w.where + (w.where ? " AND" : " WHERE") + " tc.has_error = 1";
   const sql =
-    "SELECT tc.name, tc.arg_sig," +
-    " COUNT(*) AS count, SUM(tc.est_tokens) AS tokens," +
-    " COUNT(DISTINCT tc.session_native_id) AS sessions," +
-    " " + topProjectSub(f) + " AS project," +
-    " (SELECT error_class FROM tool_call e WHERE e.name = tc.name AND e.arg_sig = tc.arg_sig AND e.has_error = 1 AND e.error_class IS NOT NULL" +
-    "   GROUP BY e.error_class ORDER BY COUNT(*) DESC LIMIT 1) AS sample" +
-    " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
-    w.where +
-    (w.where ? " AND" : " WHERE") +
-    " tc.has_error = 1" +
-    " GROUP BY tc.name, tc.arg_sig HAVING count >= $floor" +
-    " ORDER BY count DESC, tokens DESC LIMIT $top";
+    "WITH attr AS (" +
+    "  SELECT tc.name AS name, tc.arg_sig AS arg_sig, tc.est_tokens AS est, tc.session_native_id AS sid," +
+    "    " + ATTR_USD + " AS usd" +
+    "  FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" + COST_JOIN +
+    errWhere +
+    ")" +
+    " SELECT name, arg_sig, COUNT(*) AS count, SUM(est) AS tokens, SUM(usd) AS usd," +
+    " COUNT(DISTINCT sid) AS sessions FROM attr" +
+    " GROUP BY name, arg_sig HAVING count >= $floor" +
+    " ORDER BY count DESC, (usd IS NULL), usd DESC LIMIT $top";
   const rows = db.query(sql).all({ ...w.params, $floor: MIN_COUNT, $top: f.top } as Record<string, string | number>) as {
     name: string;
     arg_sig: string;
     count: number;
     tokens: number;
+    usd: number | null;
     sessions: number;
-    project: string | null;
-    sample: string | null;
   }[];
-  return rows.map((r) => ({
-    analyzer: "tool-errors",
-    key: r.arg_sig,
-    score: r.count, // failures rank by how often they recur
-    count: r.count,
-    tokens: r.tokens,
-    sessions: r.sessions,
-    project: projectBase(r.project),
-    details: detailsFor(f, r.name, r.arg_sig, MAX_DETAILS),
-    examples: examplesForSig(f, r.name, r.arg_sig, true),
-    ...(r.sample ? { sample: r.sample } : {}),
-  }));
+  return rows.map((r) => {
+    // Most common real error_class for this bucket (display sample).
+    const sample = (db
+      .query(
+        "SELECT error_class AS s FROM tool_call WHERE name = ? AND arg_sig = ? AND has_error = 1 AND error_class IS NOT NULL GROUP BY error_class ORDER BY COUNT(*) DESC LIMIT 1",
+      )
+      .get(r.name, r.arg_sig) as { s: string } | null)?.s;
+    return {
+      analyzer: "tool-errors",
+      key: r.arg_sig,
+      score: r.count, // failures rank by how often they recur
+      count: r.count,
+      tokens: r.tokens,
+      usd: r.usd,
+      sessions: r.sessions,
+      project: topProjectFor(f, r.name, r.arg_sig),
+      details: detailsFor(f, r.name, r.arg_sig, MAX_DETAILS),
+      examples: examplesForSig(f, r.name, r.arg_sig, true),
+      ...(sample ? { sample } : {}),
+    };
+  });
 }
 
 // tool-ngram: recurring multi-call MOTIFS (create → draft → poll → get). Not a
@@ -249,15 +276,16 @@ export function toolNgram(f: InsightFilter): Signal[] {
   const w = whereFor(f, true); // automation lens: editors/no-ops excluded
   const rows = db
     .query(
-      "SELECT tc.session_native_id, tc.seq, tc.turn, tc.name, tc.arg_sig, tc.est_tokens, tc.has_error, tc.error_class, s.project" +
-        " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
+      "SELECT tc.session_native_id, tc.seq, tc.turn, tc.name, tc.arg_sig, tc.est_tokens, tc.has_error, tc.error_class, s.project," +
+        " " + ATTR_USD + " AS attr_usd" +
+        " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" + COST_JOIN +
         w.where +
         " ORDER BY tc.session_native_id, tc.seq",
     )
-    .all(w.params) as (FactRow & { project: string | null })[];
+    .all(w.params) as (FactRow & { project: string | null; attr_usd: number | null })[];
 
   // Bucket facts by session, preserving order.
-  const bySession = new Map<string, (FactRow & { project: string | null })[]>();
+  const bySession = new Map<string, (FactRow & { project: string | null; attr_usd: number | null })[]>();
   for (const r of rows) {
     let arr = bySession.get(r.session_native_id);
     if (!arr) bySession.set(r.session_native_id, (arr = []));
@@ -267,6 +295,7 @@ export function toolNgram(f: InsightFilter): Signal[] {
   interface Acc {
     count: number;
     tokens: number;
+    usd: number | null; // summed attributed spend across the window's calls
     sessions: Set<string>;
     projects: Map<string, number>; // project → occurrences, for the dominant repo
     examples: { session: string; turn: number | null; w: number }[];
@@ -279,10 +308,12 @@ export function toolNgram(f: InsightFilter): Signal[] {
       if (sigs.every((x) => x === sigs[0])) continue; // all-identical → flow noise
       const key = sigs.join(" → ");
       const tok = win.reduce((a, c) => a + c.est_tokens, 0);
+      const usd = win.reduce<number | null>((a, c) => (c.attr_usd == null ? a : (a ?? 0) + c.attr_usd), null);
       let acc = grams.get(key);
-      if (!acc) grams.set(key, (acc = { count: 0, tokens: 0, sessions: new Set(), projects: new Map(), examples: [] }));
+      if (!acc) grams.set(key, (acc = { count: 0, tokens: 0, usd: null, sessions: new Set(), projects: new Map(), examples: [] }));
       acc.count++;
       acc.tokens += tok;
+      if (usd != null) acc.usd = (acc.usd ?? 0) + usd;
       acc.sessions.add(sid);
       const proj = win[0]!.project;
       if (proj) acc.projects.set(proj, (acc.projects.get(proj) ?? 0) + 1);
@@ -304,9 +335,10 @@ export function toolNgram(f: InsightFilter): Signal[] {
     out.push({
       analyzer: "tool-ngram",
       key,
-      score: acc.tokens,
+      score: acc.usd ?? 0,
       count: acc.count,
       tokens: acc.tokens,
+      usd: acc.usd,
       sessions: acc.sessions.size,
       project: projectBase(topProj),
       examples,

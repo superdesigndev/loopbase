@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { argSig, stripNoise, errorClass, extractToolCalls, callDetail } from "../src/insights-extract.ts";
 import { openDb, closeDb } from "../src/db.ts";
 import { handle } from "../src/server.ts";
+import { toolFreq } from "../src/insights.ts";
 import type { Event } from "../src/adapters/types.ts";
 
 describe("argSig — signature normalization", () => {
@@ -230,6 +231,27 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     seed();
     const j = (await handle(new Request("http://x/api/insights?all=true")).json()) as any;
     expect(Object.keys(j.analyzers).sort()).toEqual(["tool-errors", "tool-freq", "tool-ngram"]);
+  });
+
+  test("real USD is attributed from message_tokens and split across a message's tool calls", () => {
+    process.env.LB_SKIP_REINDEX = "1";
+    dir = mkdtempSync(join(tmpdir(), "lb-ins-"));
+    process.env.LB_HOME = dir;
+    const db = openDb();
+    db.prepare("INSERT INTO sessions (native_id, agent, project, path, msg_count, last_ts) VALUES (?,?,?,?,?,?)").run("sx", "claude", "/p", "/x/sx", 10, 1000);
+    const mt = db.prepare("INSERT INTO message_tokens (session_native_id, seq, offset, agent, token_source, total_usd, dedup_key) VALUES (?,?,?,?,?,?,?)");
+    mt.run("sx", 0, 100, "claude", "usage_metadata", 0.3, "mA"); // message A: $0.30
+    mt.run("sx", 1, 200, "claude", "usage_metadata", 0.3, "mB"); // message B: $0.30
+    const tc = db.prepare("INSERT INTO tool_call (session_native_id, seq, turn, name, arg_sig, detail, dedup_key, est_tokens, has_error, error_class) VALUES (?,?,?,?,?,?,?,?,?,?)");
+    // message A has TWO calls of the same sig → its $0.30 splits 0.15 + 0.15
+    tc.run("sx", 0, 0, "Bash", "Bash:composio run", "X", "mA", 50, 0, null);
+    tc.run("sx", 1, 0, "Bash", "Bash:composio run", "X", "mA", 50, 0, null);
+    // message B has ONE call of the same sig → full $0.30
+    tc.run("sx", 2, 0, "Bash", "Bash:composio run", "X", "mB", 50, 0, null);
+    const sigs = toolFreq({ all: true, top: 20 });
+    const b = sigs.find((s) => s.key === "Bash:composio run")!;
+    expect(b.count).toBe(3);
+    expect(b.usd).toBeCloseTo(0.6, 6); // 0.15 + 0.15 + 0.30
   });
 
   test("harness (Agent) and web (WebSearch) tools are excluded from the automation lens", async () => {

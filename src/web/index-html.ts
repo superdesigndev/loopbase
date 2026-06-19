@@ -407,7 +407,8 @@ async function loadInsights() {
       const ex = (r.examples || []).map(e => e.session + (e.turn != null ? "#" + e.turn : "")).join("  ");
       const proj = r.project ? '<span class="proj-tag">' + escapeHtml(r.project) + '</span> ' : '';
       const det = (r.details && r.details.length) ? '<span class="det">┗ ' + r.details.map(d => escapeHtml((d.key || '(misc)') + ' ×' + d.count)).join('  ·  ') + '</span>' : '';
-      html += '<div class="ins-row"><span class="num">' + fmtTok(r.count) + '×</span><span class="num">' + fmtTok(r.tokens) + '</span><span class="num">' + r.sessions + ' s</span>' +
+      const money = r.usd == null ? '—' : r.usd >= 1 ? '$' + r.usd.toFixed(0) : '$' + r.usd.toFixed(2);
+      html += '<div class="ins-row"><span class="num">' + fmtTok(r.count) + '×</span><span class="num">' + money + '</span><span class="num">' + r.sessions + ' s</span>' +
         '<span class="key">' + proj + escapeHtml(r.key) + (r.sample ? ' <span class="sample">«' + escapeHtml(r.sample) + '»</span>' : '') +
         det + (ex ? '<span class="ex">' + escapeHtml(ex) + '</span>' : '') + '</span></div>';
     }

@@ -27,6 +27,7 @@ export interface UsageRow {
   cacheCreationTokens: number;
   cacheReadTokens: number;
   reasoningTokens: number;
+  dedupKey?: string; // message id:requestId — stable join key for insights cost
 }
 
 // One normalized message in a session trace.
@@ -42,6 +43,13 @@ export interface Event {
   uuid?: string;
   parentUuid?: string;
   isSidechain?: boolean;
+  // Byte offset of the source JSONL line (set on full-file readEvents). Lets a
+  // tool call join to its assistant message's memoized cost. (docs/INSIGHTS.md.)
+  offset?: number;
+  // Stable identity of an assistant message, for deduping copies the harness
+  // re-logs on compaction/resume (same key the cost layer uses). Insights dedups
+  // on this so re-logged tool calls aren't double-counted / mis-joined to cost.
+  dedupKey?: string;
   // When role === "tool_result": the tool_use id this result is for.
   toolResultId?: string;
   // When role === "tool_result": whether the tool reported an error. Optional —

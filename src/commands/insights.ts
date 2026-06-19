@@ -65,6 +65,7 @@ function signalView(s: Signal) {
     key: s.key,
     score: s.score,
     count: s.count,
+    usd: s.usd,
     tokens: s.tokens,
     sessions: s.sessions,
     ...(s.project ? { project: s.project } : {}),
@@ -76,6 +77,14 @@ function signalView(s: Signal) {
 
 function k(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
+}
+
+// USD with a $ feel; null → "unpriced" (never $0, which would imply free).
+function usd(v: number | null): string {
+  if (v == null) return "unpriced";
+  if (v >= 100) return `$${v.toFixed(0)}`;
+  if (v >= 1) return `$${v.toFixed(2)}`;
+  return `$${v.toFixed(2)}`;
 }
 
 function renderText(project: string | null, groups: Record<string, ReturnType<typeof signalView>[]>): string {
@@ -91,7 +100,7 @@ function renderText(project: string | null, groups: Record<string, ReturnType<ty
       const ex = r.examples.map((e) => `${e.session}${e.turn != null ? `#${e.turn}` : ""}`).join(" ");
       const extra = r.sample ? `  «${r.sample}»` : "";
       const proj = r.project ? `  [${r.project}]` : "";
-      lines.push(`  ${k(r.count).padStart(5)}×  ${k(r.tokens).padStart(6)} tok  ${r.sessions} sess${proj}  ${r.key}${extra}`);
+      lines.push(`  ${k(r.count).padStart(5)}×  ${usd(r.usd).padStart(8)}  ${r.sessions} sess${proj}  ${r.key}${extra}`);
       if (r.details && r.details.length) {
         lines.push("         ┗ " + r.details.map((d) => `${d.key || "(misc)"} ×${d.count}`).join("  ·  "));
       }

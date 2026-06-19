@@ -78,10 +78,12 @@ CREATE TABLE IF NOT EXISTS message_tokens (
   token_source          TEXT NOT NULL,      -- 'usage_metadata'
   total_usd             REAL,               -- MEMOIZED at index; null if unpriced
   pricing_source        TEXT,               -- catalog stamp; 'estimated:…' if read-time-filled
+  dedup_key             TEXT,               -- message id:requestId — stable join key for insights cost
   PRIMARY KEY (session_native_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_mtok_session ON message_tokens(session_native_id);
 CREATE INDEX IF NOT EXISTS idx_mtok_offset  ON message_tokens(session_native_id, offset);
+CREATE INDEX IF NOT EXISTS idx_mtok_dedup   ON message_tokens(session_native_id, dedup_key);
 
 -- Per-(session, model) rollup. The sessions list reads ONLY this table; it is
 -- never produced by scanning message_tokens at read time. Derived.
@@ -117,13 +119,15 @@ CREATE TABLE IF NOT EXISTS tool_call (
   name              TEXT NOT NULL,      -- tool name (Bash, Read, mcp__x__y, …)
   arg_sig           TEXT NOT NULL,      -- normalized signature (the bucket key)
   detail            TEXT,               -- finer sub-cluster (slug/table/shape) for drill
-  est_tokens        INTEGER DEFAULT 0,  -- I/O-size token estimate (cost weight)
+  dedup_key         TEXT,               -- issuing assistant msg id:requestId (cost join)
+  est_tokens        INTEGER DEFAULT 0,  -- I/O-size token estimate (fallback weight)
   has_error         INTEGER DEFAULT 0,
   error_class       TEXT,
   PRIMARY KEY (session_native_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_toolcall_session ON tool_call(session_native_id);
 CREATE INDEX IF NOT EXISTS idx_toolcall_sig ON tool_call(name, arg_sig);
+CREATE INDEX IF NOT EXISTS idx_toolcall_dedup ON tool_call(session_native_id, dedup_key);
 `;
 
 let _db: Database | null = null;

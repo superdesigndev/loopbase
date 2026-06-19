@@ -122,11 +122,13 @@ loopbase insights --show-signature         # debug: see how raw calls collapse i
 ```
 Three analyzers over the stored tool-call facts: `tool-freq` (repeated/expensive
 single calls), `tool-ngram` (recurring multi-call sequences), `tool-errors`
-(tools that keep failing). Each row is ranked by frequency × token weight, tagged
-with its **dominant repo**, **nested with its top sub-clusters** (so `composio
-run ×305` shows `┗ INTERCOM_SEARCH ×165 · GET_CONVERSATION ×46` — a tool tally
-becomes a task), and carries up to 3 `session#turn` examples you open with
-`show --turn`. By default the automation lens **excludes file-mutation
+(tools that keep failing). Each row is ranked by **real attributed USD** (the
+issuing message's memoized cost, joined on message id), tagged with its
+**dominant repo**, **nested with its top sub-clusters** (so `composio run` shows
+`┗ INTERCOM_SEARCH ×165 · GET_CONVERSATION ×46` — a tool tally becomes a task),
+and carries up to 3 `session#turn` examples you open with `show --turn`. So a row
+reads like `226× · $97.57 · 23 sess · mcp__posthog__exec` — spend you can
+prioritize against. By default the automation lens **excludes file-mutation
 tools** (Read/Edit/Write — the substance of coding, not scriptable; Grep/Glob
 stay). **These are candidates** — the framework finds *repeated and expensive*;
 whether something is *deterministic enough to script* is your call.

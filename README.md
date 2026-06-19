@@ -32,7 +32,9 @@ Every agent dumps its session transcript to disk. loopbase indexes all of them
 - `**loopbase insights**` — ranked automation **candidates** mined from every
 
   session's tool calls: repeated/expensive patterns, recurring call sequences,
-  and tools that keep failing. Each row links to `show --turn` examples.
+  and tools that keep failing. Ranked by **real attributed USD**, tagged with the
+  dominant repo, and nested with sub-clusters (`composio run` → the Intercom
+  tools it's really running). Each row links to `show --turn` examples.
 - `**loopbase serve**` — a local web dashboard over everything above (see below).
 
 Output is JSON by default (`--text` for humans). Session id is auto-resolved from

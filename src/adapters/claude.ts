@@ -14,7 +14,6 @@ import {
   type DerivedMeta,
   type ToolCall,
   type UsageRow,
-  parseJsonl,
   parseJsonlWithOffsets,
   extractText,
   toEpochMs,
@@ -65,9 +64,10 @@ export const claudeAdapter: Adapter = {
   },
 
   parseContent(content: string): Event[] {
-    const rows = parseJsonl(content);
+    const rows = parseJsonlWithOffsets(content);
     const events: Event[] = [];
-    for (const row of rows as any[]) {
+    for (const { obj, offset } of rows) {
+      const row = obj as any;
       if (row?.type !== "user" && row?.type !== "assistant") continue;
       const msg = row.message ?? {};
       const ev: Event = {
@@ -80,6 +80,10 @@ export const claudeAdapter: Adapter = {
         uuid: row.uuid,
         parentUuid: row.parentUuid ?? undefined,
         isSidechain: row.isSidechain === true,
+        offset,
+        // Same dedup key the cost layer keeps (message id + request id), present
+        // on assistant lines — lets insights drop re-logged copies.
+        dedupKey: row.type === "assistant" && msg.id && row.requestId ? `${msg.id}:${row.requestId}` : undefined,
       };
       const tools = extractTools(msg.content);
       if (tools.length) ev.tools = tools;
@@ -137,10 +141,11 @@ export const claudeAdapter: Adapter = {
       const u = msg.usage;
       if (!u) continue;
       // Dedup key: only when we have a stable id pair; otherwise keep the row.
+      let dedupKey: string | undefined;
       if (msg.id && row.requestId) {
-        const key = msg.id + ":" + row.requestId;
-        if (seen.has(key)) continue;
-        seen.add(key);
+        dedupKey = msg.id + ":" + row.requestId;
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
       }
       const input = u.input_tokens ?? 0;
       const cacheCreation = u.cache_creation_input_tokens ?? 0;
@@ -157,6 +162,7 @@ export const claudeAdapter: Adapter = {
         cacheCreationTokens: cacheCreation,
         cacheReadTokens: cacheRead,
         reasoningTokens: 0,
+        dedupKey,
       });
     }
     return out;

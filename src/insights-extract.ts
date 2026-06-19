@@ -18,6 +18,7 @@ export interface ToolCallFact {
   name: string;
   argSig: string;
   detail: string; // finer sub-cluster within argSig (slug / table / shape)
+  dedupKey: string | null; // issuing assistant msg id:requestId (cost join)
   estTokens: number; // estimate from I/O byte size (input + result) / 4
   hasError: boolean;
   errorClass: string | null;
@@ -260,13 +261,21 @@ export function extractToolCalls(events: Event[]): ToolCallFact[] {
     }
   }
 
-  // Second pass: assign each tool call to the user turn it sits under.
+  // Second pass: assign each tool call to the user turn it sits under. Skip
+  // assistant messages the harness re-logged (same dedupKey) so re-logged tool
+  // calls aren't double-counted and their offsets stay aligned with the cost
+  // layer (which keeps the first occurrence too).
   const facts: ToolCallFact[] = [];
+  const seenMsg = new Set<string>();
   let turnNo = -1; // → 0 at the first clean user message (matches collectTurns)
   let seq = 0;
   for (const e of events) {
     if (e.role === "user" && cleanPrompt(e.text)) turnNo++;
     if (e.role === "assistant" && e.tools) {
+      if (e.dedupKey) {
+        if (seenMsg.has(e.dedupKey)) continue; // re-logged copy → skip
+        seenMsg.add(e.dedupKey);
+      }
       for (const t of e.tools) {
         const r = t.id ? results.get(t.id) : undefined;
         // A real error = the tool reported one AND it isn't a soft harness/user
@@ -286,6 +295,7 @@ export function extractToolCalls(events: Event[]): ToolCallFact[] {
           name: t.name,
           argSig: argSig(t.name, t.input, t.inputSummary),
           detail: callDetail(t.input, t.inputSummary),
+          dedupKey: e.dedupKey ?? null,
           estTokens: estTokensFor(t.input, t.inputSummary, r?.len ?? 0),
           hasError,
           errorClass: ec,

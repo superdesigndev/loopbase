@@ -75,6 +75,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "regex", type: "bool", default: false, desc: "Treat the query as a regular expression." },
       { name: "include-tools", type: "bool", default: false, desc: "Also search tool inputs/results (noisier)." },
       { name: "files", type: "bool", default: false, desc: "Only list matching sessions + raw file paths (grep -l style), for custom piping." },
+      { name: "include-current", type: "bool", default: false, desc: "Include the caller's own session (excluded by default — it echoes the query you just typed)." },
     ],
   },
   {
