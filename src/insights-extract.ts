@@ -55,6 +55,17 @@ function fileExtOrDir(p: string): string {
 // `cd "$REPO" && git commit`). Signaturing the `cd` would collapse every command
 // run from a given dir into one useless bucket, so we skip past these.
 const SETUP_HEADS = new Set(["cd", "export", "source", ".", "set", "pushd", "popd", "env"]);
+// Pipe output filters — when a command is `realcmd | tail`, the filter is not the
+// signal; skip these segments so we signature the real command.
+const FILTER_HEADS = new Set(["tail", "head", "grep", "rg", "sort", "uniq", "wc", "jq", "sed", "awk", "cut", "tr", "less", "column", "tee", "fold", "nl"]);
+// Prefix wrappers — `timeout 30 cmd`, `sudo cmd`, `xargs cmd`. Strip the wrapper
+// (and its option/duration tokens) and signature the wrapped command.
+const WRAPPER_HEADS = new Set(["timeout", "sudo", "nice", "time", "nohup", "stdbuf", "command", "ionice", "chrt", "xargs", "doas"]);
+// Shell control-flow heads — the real command lives inside the body; bucket as
+// one clean "<kw> loop" rather than the loop variable ("for i").
+const LOOP_HEADS = new Set(["for", "while", "until", "if", "case"]);
+// Shell keywords that can lead a split segment (`for x; do <cmd>`) — not commands.
+const SHELL_KEYWORDS = new Set(["do", "then", "done", "fi", "else", "elif", "esac", "in"]);
 // Leading `FOO=bar` environment assignments before the real command.
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 // curl/wget flags that consume the NEXT token as their value — so we don't
@@ -70,12 +81,50 @@ function unquote(s: string): string {
   return s.replace(/^['"]+/, "").replace(/['"]+$/, "");
 }
 
+// Quote-aware tokenizer: split on whitespace OUTSIDE quotes, keep a quoted span
+// (e.g. a curl `-A "Mozilla/5.0 (compatible; …)"`) as ONE token, quotes stripped.
+function tokenize(s: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = "";
+  let inTok = false;
+  for (const c of s) {
+    if (q) {
+      if (c === q) q = "";
+      else cur += c;
+      inTok = true;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c;
+      inTok = true;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (inTok) out.push(cur);
+      cur = "";
+      inTok = false;
+      continue;
+    }
+    cur += c;
+    inTok = true;
+  }
+  if (inTok) out.push(cur);
+  return out;
+}
+
+// A clean command head from a raw token: basename, unquoted, with surrounding
+// shell punctuation stripped ("xargs)" → "xargs", "(compatible" → "compatible").
+function cmdHead(tok: string): string {
+  return baseName(unquote(tok)).replace(/^[^A-Za-z0-9._/~-]+/, "").replace(/[^A-Za-z0-9._/~-]+$/, "");
+}
+
 // The command head of one chain segment, after dropping env assignments.
 function segmentHead(seg: string): string {
-  const toks = seg.trim().split(/\s+/).filter(Boolean);
+  const toks = tokenize(seg);
   let i = 0;
   while (i < toks.length && ENV_ASSIGN.test(toks[i]!)) i++;
-  return i < toks.length ? baseName(unquote(toks[i]!)) : "";
+  return i < toks.length ? cmdHead(toks[i]!) : "";
 }
 
 function curlSig(argv0: string, toks: string[]): string {
@@ -107,21 +156,70 @@ function curlSig(argv0: string, toks: string[]): string {
 //   • strip leading `FOO=bar` env assignments,
 //   • curl/wget → method + host+path (skipping flag values like -H),
 //   • heredocs (`python3 <<'PY'`) collapse to one bucket (the body is unique).
-function bashSig(cmd: string): string {
-  // First meaningful chain segment (skip cd/export/... setup heads).
-  const segments = cmd.split(/&&|\|\||;|\|/).map((s) => s.trim()).filter(Boolean);
-  const target =
-    segments.find((seg) => {
-      const h = segmentHead(seg);
-      return h && !SETUP_HEADS.has(h);
-    }) ??
-    segments[segments.length - 1] ??
-    cmd;
+// Split a command on &&/||/;/| but NOT inside quotes — so a curl User-Agent
+// ("Mozilla/5.0 (compatible; …)") or any quoted `;`/`|` doesn't shatter the
+// command into bogus segments.
+function splitChain(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = "";
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (q) {
+      cur += c;
+      if (c === q) q = "";
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c;
+      cur += c;
+      continue;
+    }
+    if ((c === "&" && cmd[i + 1] === "&") || (c === "|" && cmd[i + 1] === "|")) {
+      out.push(cur);
+      cur = "";
+      i++;
+      continue;
+    }
+    if (c === ";" || c === "|") {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
+}
 
-  let tokens = target.trim().split(/\s+/).filter(Boolean);
+function bashSig(cmd: string): string {
+  // First meaningful chain segment: skip setup heads (cd/export) AND pipe filters
+  // (tail/grep) so `cd x && bun run check | tail` signatures `bun run check`.
+  const segments = splitChain(cmd);
+  const real = (seg: string) => {
+    const h = segmentHead(seg);
+    return h && !SETUP_HEADS.has(h) && !FILTER_HEADS.has(h);
+  };
+  const target = segments.find(real) ?? segments.find((s) => { const h = segmentHead(s); return h && !SETUP_HEADS.has(h); }) ?? segments[segments.length - 1] ?? cmd;
+
+  let tokens = tokenize(target);
   while (tokens.length && ENV_ASSIGN.test(tokens[0]!)) tokens.shift(); // drop env prefix
-  if (tokens.length === 0) return "Bash";
-  const argv0 = baseName(unquote(tokens[0]!));
+  // Strip prefix wrappers (timeout 30 / sudo -E / xargs -I{}) → the wrapped cmd.
+  let argv0 = tokens.length ? cmdHead(tokens[0]!) : "";
+  while (WRAPPER_HEADS.has(argv0) && tokens.length > 1) {
+    tokens.shift(); // drop the wrapper
+    while (tokens.length && (tokens[0]!.startsWith("-") || /^\d+[a-z]?$/i.test(tokens[0]!))) tokens.shift(); // its flags + duration
+    argv0 = tokens.length ? cmdHead(tokens[0]!) : "";
+  }
+  if (tokens.length === 0 || !argv0) return "Bash";
+
+  if (LOOP_HEADS.has(argv0)) return `Bash:${argv0} loop`;
+  if (SHELL_KEYWORDS.has(argv0)) return "Bash:(misc)"; // loop-body fragment, not a command
+
+  // Guard parse artifacts: a real command head starts with a letter, has a
+  // lowercase char, and isn't ALLCAPS_UNDERSCORE (an env var) — collapse the
+  // junk (`SCRAPECREATORS_API_KEY`, `·n`, a split User-Agent) into one bucket.
+  if (!(/^[A-Za-z][\w./-]*$/.test(argv0) && /[a-z]/.test(argv0)) || /^[A-Z0-9_]+$/.test(argv0)) return "Bash:(misc)";
 
   if (argv0 === "curl" || argv0 === "wget" || argv0 === "http" || argv0 === "https") {
     return stripNoise(curlSig(argv0, tokens));
@@ -130,8 +228,10 @@ function bashSig(cmd: string): string {
   // Heredoc: the script body is unique each call; the command is the signal.
   if (/<<-?\s*['"]?[A-Za-z0-9_]+/.test(target)) return stripNoise(`Bash:${argv0} <<heredoc`);
 
-  // Generic: argv0 + first non-flag, non-redirect subtoken (git commit, …).
-  const sub = tokens.slice(1).find((t) => !t.startsWith("-") && !ENV_ASSIGN.test(t) && !/^[<>|]/.test(t));
+  // Generic: argv0 + first non-flag SUBCOMMAND (git commit, composio run). A
+  // subcommand is a single short word — skip flags, env assigns, redirects, and
+  // quoted multi-word VALUES (`psql -c "select …"`) so those collapse by argv0.
+  const sub = tokens.slice(1).find((t) => !t.startsWith("-") && !ENV_ASSIGN.test(t) && !/[<>]/.test(t) && !t.includes(" ") && t.length <= 30);
   return stripNoise(`Bash:${argv0}${sub ? " " + unquote(sub) : ""}`);
 }
 

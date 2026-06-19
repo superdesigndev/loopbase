@@ -5,6 +5,8 @@
 // READ time; nothing is materialized. (docs/INSIGHTS.md → analyzers.)
 
 import { openDb } from "./db.ts";
+import { adapterFor } from "./adapters/registry.ts";
+import { cleanPrompt } from "./adapters/claude.ts";
 
 // Quality defaults — baked in, not optional (docs/INSIGHTS.md → quality):
 //   • a count floor so one-offs never surface,
@@ -30,15 +32,30 @@ export interface InsightFilter {
 // searching signals a missing index/doc, its own kind of candidate.)
 const HARNESS_TOOLS =
   "'Task','Agent','Workflow','Skill','SlashCommand','ExitPlanMode','EnterPlanMode'," +
-  "'AskUserQuestion','ToolSearch','TaskCreate','TaskUpdate','TaskList','KillShell','BashOutput'";
+  "'AskUserQuestion','ToolSearch','TaskCreate','TaskUpdate','TaskList','TaskGet','TaskStop','TaskOutput'," +
+  "'KillShell','BashOutput','CronCreate','CronDelete','CronList','Monitor','SendMessage'," +
+  "'PushNotification','RemoteTrigger','DesignSync','EnterWorktree','ExitWorktree'";
 // File-mutation tools are the SUBSTANCE of coding, not scriptable repetition —
 // excluded from the automation lens (tool-freq / tool-ngram) unless --include-edits.
 const EDITOR_TOOLS = "'Read','Edit','Write','NotebookEdit'";
 // Web tools are exploratory I/O (every search/fetch differs), not deterministic
 // scriptable work — excluded from the automation lens.
 const WEB_TOOLS = "'WebSearch','WebFetch'";
-// Pure no-op shell — never an automation candidate (and `echo` banners pollute).
-const NOOP_BASH_PREFIXES = ["Bash:echo", "Bash:true", "Bash:sleep", "Bash::", "Bash:printf", "Bash:cd "];
+// Pure no-op shell + shell control-flow buckets — never an automation candidate
+// (and `echo` banners / "for loop" lumps pollute). Dropped from every lens.
+const NOOP_BASH_PREFIXES = [
+  "Bash:echo", "Bash:true", "Bash:sleep", "Bash::", "Bash:printf", "Bash:cd ",
+  "Bash:for loop", "Bash:while loop", "Bash:until loop", "Bash:if loop", "Bash:case loop",
+  "Bash:(misc)",
+];
+// Routine dev plumbing (version control, build/test, file nav) — how coding
+// works, not scriptable repetition. Excluded from the automation lens by argv0.
+// (gh/cat/stripe/supabase/psql/composio/curl/python stay — they're domain work.)
+const PLUMBING_ARGV0 = [
+  "git", "ls", "tsc", "npx", "npm", "pnpm", "yarn", "bun", "make", "cargo", "go",
+  "find", "mkdir", "rm", "mv", "cp", "touch", "chmod", "tail", "head", "grep", "rg",
+  "sed", "awk", "cut", "sort", "uniq", "wc", "jq", "less", "which", "lsof", "ps", "kill", "diff", "xargs",
+];
 
 // A ranked candidate. `examples` carry the full session id + turn so the caller
 // can shorten it and feed `show --turn`. Candidates only — the deterministic /
@@ -99,10 +116,16 @@ function scopeParams(f: InsightFilter): Record<string, string | number> {
 // file-mutation tools (unless includeEdits). No-op shell is always dropped.
 function candidateConds(f: InsightFilter, candidate: boolean): string[] {
   const parts: string[] = [`tc.name NOT IN (${HARNESS_TOOLS})`];
-  if (candidate) {
-    parts.push(`tc.name NOT IN (${WEB_TOOLS})`);
-    if (!f.includeEdits) parts.push(`tc.name NOT IN (${EDITOR_TOOLS})`);
-  }
+  // File-mutation tools: substance of coding (automation lens) AND harness
+  // mechanics in errors ("string not found") — dropped from both unless asked.
+  if (!f.includeEdits) parts.push(`tc.name NOT IN (${EDITOR_TOOLS})`);
+  // Routine dev plumbing (git/build/file-nav) — noise in both lenses.
+  for (const cmd of PLUMBING_ARGV0) parts.push(`tc.arg_sig NOT LIKE 'Bash:${cmd}' AND tc.arg_sig NOT LIKE 'Bash:${cmd} %'`);
+  // Bare `cat <file>` is file-reading (plumbing, like Read) — but keep
+  // `cat <<heredoc` (writing scripts/configs) which has its own signature.
+  parts.push(`tc.arg_sig <> 'Bash:cat'`);
+  // Web tools are exploratory (automation lens only; a failing fetch can matter).
+  if (candidate) parts.push(`tc.name NOT IN (${WEB_TOOLS})`);
   for (const pre of NOOP_BASH_PREFIXES) parts.push(`tc.arg_sig NOT LIKE '${pre}%'`);
   return parts;
 }
@@ -171,10 +194,13 @@ export function detailsFor(f: InsightFilter, name: string, argSig: string, limit
     " GROUP BY tc.detail ORDER BY count DESC LIMIT $cap";
   const rows = db
     .query(sql)
-    .all({ ...scopeParams(f), $n: name, $sig: argSig, $cap: limit } as Record<string, string | number>) as { key: string; count: number }[];
+    .all({ ...scopeParams(f), $n: name, $sig: argSig, $cap: limit + 4 } as Record<string, string | number>) as { key: string; count: number }[];
+  // Drop JSON-shape junk (structured-input tools collapse to "{STR:…}") — it's
+  // noise, not a sub-cluster.
+  const clean = rows.filter((r) => r.key && !r.key.startsWith("{")).slice(0, limit);
   // A single sub-cluster that just restates the bucket adds nothing — drop it.
-  if (rows.length === 1 && (rows[0]!.key === "" || rows[0]!.key === argSig)) return [];
-  return rows;
+  if (clean.length === 1 && (clean[0]!.key === "" || clean[0]!.key === argSig)) return [];
+  return clean;
 }
 
 // tool-freq: "what did we do over and over." GROUP BY (name, arg_sig), through
@@ -266,6 +292,19 @@ export function toolErrors(f: InsightFilter): Signal[] {
   });
 }
 
+// Canonical form of a cyclic sequence: the lexicographically-smallest rotation,
+// so A→B→C, B→C→A and C→A→B (the same loop seen at different start points) all
+// collapse into one bucket.
+function canonicalRotation(sigs: string[]): string {
+  let best: string[] | null = null;
+  for (let i = 0; i < sigs.length; i++) {
+    const rot = [...sigs.slice(i), ...sigs.slice(0, i)];
+    const k = rot.join("");
+    if (best === null || k < best.join("")) best = rot;
+  }
+  return (best ?? sigs).join(" → ");
+}
+
 // tool-ngram: recurring multi-call MOTIFS (create → draft → poll → get). Not a
 // clean GROUP BY — it needs ordered per-session sequences + windowing, so it's a
 // thin programmatic pass over the same `tool_call` table (indexed read, no JSONL
@@ -306,7 +345,7 @@ export function toolNgram(f: InsightFilter): Signal[] {
       const win = calls.slice(i, i + NGRAM_N);
       const sigs = win.map((c) => c.arg_sig);
       if (sigs.every((x) => x === sigs[0])) continue; // all-identical → flow noise
-      const key = sigs.join(" → ");
+      const key = canonicalRotation(sigs); // collapse cyclic rotations of one loop
       const tok = win.reduce((a, c) => a + c.est_tokens, 0);
       const usd = win.reduce<number | null>((a, c) => (c.attr_usd == null ? a : (a ?? 0) + c.attr_usd), null);
       let acc = grams.get(key);
@@ -385,10 +424,15 @@ export function toolErrorRetry(f: InsightFilter): Signal[] {
     errs: Map<string, number>; // error_class → count, for the sample
     examples: { session: string; turn: number | null }[];
   }
+  // File-tool errors ("string not found", "file modified") are harness
+  // mechanics, not procedure/integration signals — skip them so this lens is
+  // about EXTERNAL tools/commands that genuinely keep failing.
+  const FILE_TOOL_SET = new Set(["Read", "Edit", "Write", "NotebookEdit"]);
   const buckets = new Map<string, Acc>();
   for (const [sid, calls] of bySession) {
     for (let i = 0; i < calls.length; i++) {
       if (!calls[i]!.has_error) continue;
+      if (FILE_TOOL_SET.has(calls[i]!.name)) continue;
       const sig = calls[i]!.arg_sig;
       // Was the same call retried within the window?
       let retried = false;
@@ -435,12 +479,93 @@ export function toolErrorRetry(f: InsightFilter): Signal[] {
   return out.slice(0, f.top);
 }
 
-// The registry. Add a detector = add a function + a key.
+// user-correction: the REGRET that matters — where the HUMAN corrected the
+// agent. What you reject is what the agent should learn not to do, so these are
+// the richest procedure-improvement candidates. Two sources: a tool the user
+// DECLINED (ExitPlanMode/AskUserQuestion "doesn't want to proceed"), and
+// free-text PUSHBACK ("no…", "actually…", "that's wrong"). Unlike the other
+// lenses this reads transcripts (user-message TEXT isn't in the index), so it's
+// opt-in, not in the default set. Output is the MOMENTS to read, not buckets —
+// the value is the human's actual words + a `show --turn` pointer.
+const CORRECTION_SESSION_CAP = 500; // bound the transcript scan
+// Lead-in pushback language. Recall-tuned (the coach/human filters); guarded
+// against the obvious false friends ("no problem").
+const PUSHBACK_RE =
+  /\b(no[,.]|nope|don'?t |do not |stop\b|revert\b|undo\b|that'?s wrong|that'?s not right|not what i (wanted|asked|meant)|instead of|rather than|why (did|are) you|you (shouldn'?t|should not)|i (said|told you)|that'?s incorrect|actually[, ])/i;
+const PUSHBACK_GUARD = /\bno (problem|worries|rush|need|biggie|issue)/i;
+const DECLINE_RE = /(doesn'?t|does not|don'?t|do not) want to proceed|user (rejected|declined)/i;
+
+export function userCorrection(f: InsightFilter): Signal[] {
+  const db = openDb();
+  const conds = scopeConds(f, "s");
+  const sessions = db
+    .query("SELECT s.native_id, s.agent, s.path, s.project FROM sessions s" + (conds.length ? " WHERE " + conds.join(" AND ") : "") + " ORDER BY s.last_ts DESC LIMIT $cap")
+    .all({ ...scopeParams(f), $cap: CORRECTION_SESSION_CAP } as Record<string, string | number>) as { native_id: string; agent: string; path: string; project: string | null }[];
+
+  const pushbacks: { session: string; turn: number | null; ts: number | null; quote: string; prev: string; project: string | null }[] = [];
+  const rejects = new Map<string, { count: number; sessions: Set<string>; examples: { session: string; turn: number | null }[]; project: string | null }>();
+
+  for (const s of sessions) {
+    const adapter = adapterFor(s.agent as never);
+    if (!adapter) continue;
+    let events;
+    try {
+      events = adapter.readEvents(s.path);
+    } catch {
+      continue;
+    }
+    // tool_use id → name, so a decline result maps back to the tool.
+    const idName = new Map<string, string>();
+    for (const e of events) if (e.role === "assistant" && e.tools) for (const t of e.tools) if (t.id) idName.set(t.id, t.name);
+
+    let turnNo = -1;
+    let prev = ""; // what the agent was doing just before
+    for (const e of events) {
+      if (e.role === "user") {
+        const txt = cleanPrompt(e.text);
+        if (!txt) continue;
+        turnNo++;
+        if (turnNo > 0 && txt.length < 600 && PUSHBACK_RE.test(txt) && !PUSHBACK_GUARD.test(txt)) {
+          pushbacks.push({ session: s.native_id, turn: turnNo, ts: e.ts, quote: txt.replace(/\s+/g, " ").slice(0, 140), prev, project: projectBase(s.project) });
+        }
+      } else if (e.role === "assistant" && e.tools && e.tools.length) {
+        prev = e.tools[0]!.inputSummary ?? e.tools[0]!.name;
+      } else if (e.role === "tool_result" && e.text && DECLINE_RE.test(e.text)) {
+        const tool = e.toolResultId ? idName.get(e.toolResultId) ?? "tool" : "tool";
+        const key = `rejected: ${tool}`;
+        let acc = rejects.get(key);
+        if (!acc) rejects.set(key, (acc = { count: 0, sessions: new Set(), examples: [], project: projectBase(s.project) }));
+        acc.count++;
+        acc.sessions.add(s.native_id);
+        if (acc.examples.length < MAX_EXAMPLES && !acc.examples.some((x) => x.session === s.native_id)) acc.examples.push({ session: s.native_id, turn: turnNo < 0 ? null : turnNo });
+      }
+    }
+  }
+
+  const out: Signal[] = [];
+  // Rejection aggregates first (recurrence-ranked).
+  for (const [key, acc] of [...rejects.entries()].sort((a, b) => b[1].count - a[1].count)) {
+    out.push({ analyzer: "user-correction", key, score: acc.count, count: acc.count, tokens: 0, usd: null, sessions: acc.sessions.size, project: acc.project, examples: acc.examples });
+  }
+  // Then the most RECENT free-text pushback moments (each is its own row — the
+  // human's actual words are the signal; reading them is the point).
+  pushbacks.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
+  for (const p of pushbacks.slice(0, f.top)) {
+    out.push({ analyzer: "user-correction", key: `"${p.quote}"`, score: 0, count: 1, tokens: 0, usd: null, sessions: 1, project: p.project, examples: [{ session: p.session, turn: p.turn }], ...(p.prev ? { sample: `after ${p.prev}` } : {}) });
+  }
+  return out.slice(0, Math.max(f.top, rejects.size + Math.min(pushbacks.length, f.top)));
+}
+
+// The registry: ALL analyzers (addressable via --analyzer). DEFAULT_ANALYZERS is
+// the subset the bare `insights` runs — the cheap index-only lenses. error-retry
+// (low signal) and user-correction (reads transcripts) are opt-in.
 export const ANALYZERS: Record<string, (f: InsightFilter) => Signal[]> = {
   "tool-freq": toolFreq,
   "tool-errors": toolErrors,
   "tool-ngram": toolNgram,
   "tool-error-retry": toolErrorRetry,
+  "user-correction": userCorrection,
 };
 
 export const ANALYZER_NAMES = Object.keys(ANALYZERS);
+export const DEFAULT_ANALYZERS = ["tool-freq", "tool-errors", "tool-ngram"];

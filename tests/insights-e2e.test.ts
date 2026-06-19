@@ -69,6 +69,17 @@ beforeAll(() => {
 
   // Session 2: the same sequence ×2 (gives cross-session ngram recurrence).
   writeFileSync(join(dir, `${S2}.jsonl`), sequenceLines(S2, 2).join("\n") + "\n");
+
+  // Session 3: a human correction (free-text pushback) + an AskUserQuestion the
+  // user declined — fodder for the user-correction analyzer.
+  const S3 = "cccccccc-3333-3333-3333-333333333333";
+  const s3 = [
+    JSON.stringify({ type: "user", sessionId: S3, cwd: PROJ, gitBranch: "main", timestamp: "2026-06-17T00:00:00.000Z", message: { role: "user", content: "start the correction task" } }),
+    ...step(`${S3}-a`, "Bash", { command: "ls" }, "ok"),
+    JSON.stringify({ type: "user", cwd: PROJ, timestamp: "2026-06-17T00:00:03.000Z", message: { role: "user", content: "no, that's wrong, use a different approach" } }),
+    ...step(`${S3}-q`, "AskUserQuestion", { question: "proceed?" }, "The user doesn't want to proceed with this tool use."),
+  ];
+  writeFileSync(join(dir, `${S3}.jsonl`), s3.join("\n") + "\n");
 });
 
 afterAll(() => {
@@ -140,9 +151,16 @@ describe("insights end-to-end", () => {
     expect(top.project).toBe("lb-insights-proj");
   });
 
-  test("default runs all analyzers", () => {
+  test("default runs the cheap index-only lenses (opt-ins excluded)", () => {
     const r = run(["insights", "--path", PROJ]);
-    expect(Object.keys(r.analyzers).sort()).toEqual(["tool-error-retry", "tool-errors", "tool-freq", "tool-ngram"]);
+    expect(Object.keys(r.analyzers).sort()).toEqual(["tool-errors", "tool-freq", "tool-ngram"]);
+  });
+
+  test("user-correction surfaces free-text pushback and a declined tool", () => {
+    const r = run(["insights", "--analyzer", "user-correction", "--path", PROJ]);
+    const rows = r.analyzers["user-correction"];
+    expect(rows.some((s: any) => s.key === "rejected: AskUserQuestion")).toBe(true);
+    expect(rows.some((s: any) => s.key.includes("no, that's wrong"))).toBe(true);
   });
 
   test("bad --analyzer enumerates the valid set (self-healing)", () => {

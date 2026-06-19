@@ -21,7 +21,7 @@ export const BIN_NAME = "loopbase";
 // v9: + msg_offset on tool_call → real USD attribution per bucket.
 // v10: dedup re-logged assistant messages in extraction (accurate counts + cost join).
 // v11: cost join on message id (dedup_key) not byte offset — handles streaming partials.)
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 18;
 
 import { homedir } from "node:os";
 import { join } from "node:path";

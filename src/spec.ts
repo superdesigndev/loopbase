@@ -114,7 +114,7 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Ranked automation candidates: repeated/expensive tool patterns, call sequences, and errors.",
     args: [],
     flags: [
-      { name: "analyzer", type: "string", desc: "Comma-separated analyzers (default all): tool-freq, tool-ngram, tool-errors, tool-error-retry." },
+      { name: "analyzer", type: "string", desc: "Comma-separated. Default: tool-freq, tool-errors, tool-ngram. Opt-in: tool-error-retry, user-correction (reads transcripts)." },
       { name: "path", type: "string", desc: "Scope to another directory instead of cwd." },
       { name: "all", type: "bool", default: false, desc: "Every project, not just the current one." },
       { name: "since", type: "string", desc: "Only sessions updated within this window, e.g. 24h, 7d." },
@@ -126,7 +126,7 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     name: "serve",
-    summary: "Local web UI for sessions + cost (reads the index; re-indexes on each load).",
+    summary: "Local web UI — cost, the global worklog feed, and insights (reads the index; re-indexes on each load).",
     args: [],
     flags: [{ name: "port", type: "int", default: 4178, desc: "Port to listen on (default 4178)." }],
   },

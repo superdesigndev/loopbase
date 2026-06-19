@@ -2,7 +2,7 @@
 // each adapter's transcript files, skips unchanged ones by mtime, re-parses the
 // rest, and upserts session/subagent rows. (PLAN.md → Incremental indexer.)
 
-import { openDb, resetDb } from "./db.ts";
+import { openDb, resetDb, withBusyRetry } from "./db.ts";
 import { ADAPTERS } from "./adapters/registry.ts";
 import { resolveProject, currentGitBranch } from "./project.ts";
 import type { SourceFile } from "./adapters/types.ts";
@@ -163,7 +163,11 @@ export function reindex(opts: { rebuild?: boolean } = {}): IndexStats {
   ADAPTERS.forEach((adapter, adapterIdx) => {
     for (const file of safeEnumerate(adapter)) queue.push({ adapterIdx, file });
   });
-  tx(queue);
+  // The whole scan is one write transaction — under contention (a concurrent
+  // `lb log` or a `lb serve` request reindexing) a waiter can still lose the
+  // lock after busy_timeout, so retry. Upserts are idempotent; a re-run just
+  // re-skips the already-indexed files by mtime.
+  withBusyRetry(() => tx(queue));
 
   return stats;
 }

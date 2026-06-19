@@ -76,6 +76,30 @@ describe("argSig — signature normalization", () => {
     expect(argSig("Bash", { command: "cat file.json | jq '.x'" })).toBe("Bash:cat file.json");
   });
 
+  test("Bash: pipe output filters (tail/grep) are skipped for the real command", () => {
+    expect(argSig("Bash", { command: 'cd "/repo" && bun run check 2>&1 | tail -50' })).toBe("Bash:bun run");
+    expect(argSig("Bash", { command: "npx tsc --noEmit | grep error" })).toBe("Bash:npx tsc");
+  });
+
+  test("Bash: prefix wrappers (timeout/sudo/xargs) are stripped to the wrapped cmd", () => {
+    expect(argSig("Bash", { command: "timeout 30 composio run FOO" })).toBe("Bash:composio run");
+    expect(argSig("Bash", { command: "sudo -E systemctl restart x" })).toBe("Bash:systemctl restart");
+  });
+
+  test("Bash: control-flow heads collapse to one bucket, not the loop var", () => {
+    expect(argSig("Bash", { command: "for f in a b c; do echo $f; done" })).toBe("Bash:for loop");
+  });
+
+  test("Bash: quote-aware split keeps a curl User-Agent intact (no bogus segment)", () => {
+    const sig = argSig("Bash", { command: 'curl -A "Mozilla/5.0 (compatible; Googlebot/2.1)" https://x.dev/api/scrape' });
+    expect(sig).toBe("Bash:curl GET x.dev/api/scrape");
+    expect(sig).not.toContain("compatible");
+  });
+
+  test("Bash: parse-artifact / env-var-like heads collapse to (misc)", () => {
+    expect(argSig("Bash", { command: "SCRAPECREATORS_API_KEY .env" })).toBe("Bash:(misc)");
+  });
+
   test("MCP: name + sorted arg KEYS, never values", () => {
     const a = argSig("mcp__supabase__query", { sql: "select 1" });
     const b = argSig("mcp__supabase__query", { sql: "select 2 from t" });
@@ -230,7 +254,15 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
   test("default returns every analyzer group", async () => {
     seed();
     const j = (await handle(new Request("http://x/api/insights?all=true")).json()) as any;
-    expect(Object.keys(j.analyzers).sort()).toEqual(["tool-error-retry", "tool-errors", "tool-freq", "tool-ngram"]);
+    expect(Object.keys(j.analyzers).sort()).toEqual(["tool-errors", "tool-freq", "tool-ngram"]);
+  });
+
+  test("analyzer=all runs the full registry (incl. opt-in lenses) — for the web Insights tab", async () => {
+    seed();
+    const j = (await handle(new Request("http://x/api/insights?all=true&analyzer=all")).json()) as any;
+    expect(Object.keys(j.analyzers).sort()).toEqual(
+      ["tool-error-retry", "tool-errors", "tool-freq", "tool-ngram", "user-correction"],
+    );
   });
 
   test("real USD is attributed from message_tokens and split across a message's tool calls", () => {

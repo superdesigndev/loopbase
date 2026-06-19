@@ -5,7 +5,7 @@
 
 import { reindex } from "../indexer.ts";
 import { listSessions } from "../queries.ts";
-import { ANALYZERS, ANALYZER_NAMES, type InsightFilter, type Signal } from "../insights.ts";
+import { ANALYZERS, ANALYZER_NAMES, DEFAULT_ANALYZERS, type InsightFilter, type Signal } from "../insights.ts";
 import { argSig } from "../insights-extract.ts";
 import { ADAPTERS } from "../adapters/registry.ts";
 import { resolveProject } from "../project.ts";
@@ -39,9 +39,10 @@ export function runInsights(inv: Invocation): void {
     return;
   }
 
-  // Resolve the analyzer list (default = all). Validate against the registry so a
-  // typo enumerates the valid set (self-healing).
-  let names = ANALYZER_NAMES;
+  // Resolve the analyzer list. Default = the cheap index-only lenses; the rest
+  // (error-retry, user-correction) are opt-in via --analyzer. Validate against
+  // the full registry so a typo enumerates the valid set (self-healing).
+  let names = DEFAULT_ANALYZERS;
   if (typeof inv.flags.analyzer === "string") {
     names = inv.flags.analyzer.split(",").map((s) => s.trim()).filter(Boolean);
     for (const n of names) {

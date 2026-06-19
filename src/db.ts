@@ -138,7 +138,12 @@ export function openDb(): Database {
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path, { create: true });
   db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA busy_timeout = 3000;");
+  // Daemonless: many processes (every `lb` command + each `lb serve` request +
+  // concurrent agents calling `lb log`) write to this one file. WAL serializes
+  // writers, and a full reindex can hold the write lock for seconds — so give a
+  // waiter a generous window before it gives up. Paired with withBusyRetry() on
+  // the write entrypoints for the rare case the window is still exceeded.
+  db.exec("PRAGMA busy_timeout = 10000;");
   // Migrate BEFORE applying SCHEMA: a stale derived table can lack columns that
   // SCHEMA's CREATE INDEX references, which would throw. So drop stale derived
   // tables first, then (re)create everything. worklog + meta are preserved.
@@ -166,6 +171,28 @@ export function openDb(): Database {
   }
   _db = db;
   return db;
+}
+
+// Run a write through a bounded retry on SQLite "database is locked"
+// (SQLITE_BUSY) — the daemonless safety net. busy_timeout already waits inside
+// SQLite; this covers the rare case a writer still loses the race after that
+// (e.g. a full reindex in another process held the lock the whole window). Reads
+// never need this; only writers contend. Idempotent writes only (our upserts +
+// the worklog insert are), so a re-run is safe.
+export function isBusyError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /database is locked|SQLITE_BUSY|database table is locked/i.test(msg);
+}
+
+export function withBusyRetry<T>(fn: () => T, tries = 5): T {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fn();
+    } catch (e) {
+      if (attempt >= tries - 1 || !isBusyError(e)) throw e;
+      Bun.sleepSync(80 * (attempt + 1)); // brief, escalating backoff
+    }
+  }
 }
 
 // Drop + recreate the DERIVED tables only (what `index --rebuild` calls). NEVER

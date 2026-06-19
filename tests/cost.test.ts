@@ -123,6 +123,53 @@ describe("Phase 6 — server API", () => {
     expect(w.cost_usd).toBeCloseTo(25, 6);
   });
 
+  test("GET /api/logs returns the global feed (newest first) with attributed cost per entry", async () => {
+    const db = await seed(); // session 'sa' has a $25 message at offset 0
+    db.prepare(
+      "INSERT INTO worklog (id, session_native_id, project, text, body, tags, from_offset, to_offset, msg_count, created_at, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ).run("lg_a", "sa", "/proj", "older entry", null, "infra", null, null, 2, 1000, "h1");
+    db.prepare(
+      "INSERT INTO worklog (id, session_native_id, project, text, body, tags, from_offset, to_offset, msg_count, created_at, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ).run("lg_b", "sa", "/proj", "newer entry", "the detail", "product", 0, 100, 3, 2000, "h2");
+    const j = (await handle(new Request("http://x/api/logs?all=true")).json()) as any;
+    expect(j.count).toBe(2);
+    expect(j.logs[0].text).toBe("newer entry"); // created_at DESC
+    expect(j.logs[0].project).toBe("/proj");
+    expect(j.logs[0].agent).toBe("claude");
+    expect(j.logs[0].session).toBe("sa"); // shortId
+    expect(j.logs[0].cost_usd).toBeCloseTo(25, 6); // span [0,100) picks up the $25 message
+    expect(j.logs[1].cost_usd).toBeNull(); // no byte span → no attributable cost
+    expect(j.total_usd).toBeCloseTo(25, 6);
+  });
+
+  test("/messages scopes by ?turn (insight drill) and ?from&to (log span)", async () => {
+    process.env.LB_SKIP_REINDEX = "1";
+    const t = freshDb();
+    dir = t.dir;
+    const db = t.db;
+    const SID = "tracesession";
+    const file = join(t.dir, SID + ".jsonl");
+    const lines = [
+      { type: "user", sessionId: SID, timestamp: "2026-06-17T00:00:00.000Z", message: { role: "user", content: "turn zero question" } },
+      { type: "assistant", sessionId: SID, timestamp: "2026-06-17T00:00:01.000Z", message: { role: "assistant", content: [{ type: "text", text: "reply zero" }] } },
+      { type: "user", sessionId: SID, timestamp: "2026-06-17T00:00:02.000Z", message: { role: "user", content: "turn one question" } },
+      { type: "assistant", sessionId: SID, timestamp: "2026-06-17T00:00:03.000Z", message: { role: "assistant", content: [{ type: "text", text: "reply one" }] } },
+    ];
+    const ser = lines.map((l) => JSON.stringify(l));
+    writeFileSync(file, ser.join("\n") + "\n");
+    const off2 = Buffer.byteLength(ser.slice(0, 2).join("\n") + "\n", "utf8"); // start of turn one
+    const off4 = Buffer.byteLength(ser.join("\n") + "\n", "utf8");
+    db.prepare("INSERT INTO sessions (native_id, agent, project, path, msg_count, last_ts) VALUES (?,?,?,?,?,?)").run(SID, "claude", "/p", file, 4, 1000);
+
+    const jt = (await handle(new Request("http://x/api/sessions/" + SID + "/messages?turn=1")).json()) as any;
+    expect(jt.scope).toBe("turn:1");
+    expect(jt.messages.map((m: any) => m.text)).toEqual(["turn one question", "reply one"]);
+
+    const js = (await handle(new Request("http://x/api/sessions/" + SID + "/messages?from=" + off2 + "&to=" + off4)).json()) as any;
+    expect(js.scope).toBe("span:" + off2 + "-" + off4);
+    expect(js.messages.map((m: any) => m.text)).toEqual(["turn one question", "reply one"]);
+  });
+
   test("/messages endpoint returns a paged, bounded shape", async () => {
     await seed();
     const j = (await handle(new Request("http://x/api/sessions/sa/messages?offset=0&limit=60")).json()) as any;
