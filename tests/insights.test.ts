@@ -155,6 +155,19 @@ describe("extractToolCalls — facts from events", () => {
     expect(facts[0]!.estTokens).toBeGreaterThanOrEqual(0);
   });
 
+  test("soft errors (read-before-edit, cancellation) are NOT counted as errors", () => {
+    const events: Event[] = [
+      ev({ role: "user", text: "go" }),
+      ev({ role: "assistant", tools: [{ id: "s1", name: "Edit", input: { file_path: "/x/a.ts" } }] }),
+      ev({ role: "tool_result", toolResultId: "s1", text: "<tool_use_error>File has not been read yet. Read it first</tool_use_error>", toolResultError: true }),
+      ev({ role: "assistant", tools: [{ id: "s2", name: "Bash", input: { command: "psql -c 'x'" } }] }),
+      ev({ role: "tool_result", toolResultId: "s2", text: "ERROR: boom", toolResultError: true }),
+    ];
+    const facts = extractToolCalls(events);
+    expect(facts.find((f) => f.name === "Edit")!.hasError).toBe(false); // soft → not an error
+    expect(facts.find((f) => f.name === "Bash")!.hasError).toBe(true); // real failure
+  });
+
   test("calls before the first user turn get turn = null", () => {
     const events: Event[] = [
       ev({ role: "assistant", tools: [{ id: "t0", name: "Bash", input: { command: "echo hi" } }] }),
@@ -195,6 +208,9 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     );
     // 4 identical automatable calls → above the count floor of 3
     for (let i = 0; i < 4; i++) ins.run("ses12345extra", i, 0, "Bash", "Bash:composio run", "INTERCOM_SEARCH_CONVERSATIONS", 500, 0, null);
+    // harness + web tools that should NEVER appear in the automation lens
+    for (let i = 0; i < 5; i++) ins.run("ses12345extra", 10 + i, 0, "Agent", "Agent:Explore", "x", 500, 0, null);
+    for (let i = 0; i < 5; i++) ins.run("ses12345extra", 20 + i, 0, "WebSearch", "WebSearch", "q", 500, 0, null);
     return db;
   }
 
@@ -214,5 +230,14 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     seed();
     const j = (await handle(new Request("http://x/api/insights?all=true")).json()) as any;
     expect(Object.keys(j.analyzers).sort()).toEqual(["tool-errors", "tool-freq", "tool-ngram"]);
+  });
+
+  test("harness (Agent) and web (WebSearch) tools are excluded from the automation lens", async () => {
+    seed();
+    const j = (await handle(new Request("http://x/api/insights?all=true&analyzer=tool-freq")).json()) as any;
+    const keys = j.analyzers["tool-freq"].map((s: any) => s.key);
+    expect(keys).toContain("Bash:composio run");
+    expect(keys).not.toContain("Agent:Explore");
+    expect(keys).not.toContain("WebSearch");
   });
 });

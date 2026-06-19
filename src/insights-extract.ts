@@ -170,6 +170,14 @@ export function argSig(name: string, input: unknown, inputSummary?: string): str
   return name;
 }
 
+// "Soft" errors are harness/workflow artifacts, NOT tool failures: the agent
+// editing before reading, the user cancelling a tool, a parallel call being
+// dropped. They're noise in a reliability lens, so we treat them as non-errors.
+const SOFT_ERROR_RE = /has not been read yet|has been modified since read|want to proceed|Cancelled: parallel|^\s*<?tool_use_error>?\s*Blocked:/i;
+export function isSoftError(text: string): boolean {
+  return SOFT_ERROR_RE.test(text);
+}
+
 // Coarse error bucket from a tool-result text — a short, noise-stripped key so
 // the same failure groups. Display/grouping aid only; the error analyzer keys
 // primarily on (name, argSig). Returns null for empty results.
@@ -261,6 +269,17 @@ export function extractToolCalls(events: Event[]): ToolCallFact[] {
     if (e.role === "assistant" && e.tools) {
       for (const t of e.tools) {
         const r = t.id ? results.get(t.id) : undefined;
+        // A real error = the tool reported one AND it isn't a soft harness/user
+        // artifact (read-before-edit, cancellation, parallel-drop).
+        let hasError = false;
+        let ec: string | null = null;
+        if (r?.err) {
+          const txt = findResultText(events, t.id);
+          if (!isSoftError(txt)) {
+            hasError = true;
+            ec = errorClass(txt);
+          }
+        }
         facts.push({
           seq: seq++,
           turn: turnNo < 0 ? null : turnNo,
@@ -268,8 +287,8 @@ export function extractToolCalls(events: Event[]): ToolCallFact[] {
           argSig: argSig(t.name, t.input, t.inputSummary),
           detail: callDetail(t.input, t.inputSummary),
           estTokens: estTokensFor(t.input, t.inputSummary, r?.len ?? 0),
-          hasError: r?.err === true,
-          errorClass: r?.err ? errorClass(findResultText(events, t.id)) : null,
+          hasError,
+          errorClass: ec,
         });
       }
     }

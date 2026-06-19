@@ -25,10 +25,18 @@ export interface InsightFilter {
   includeEdits?: boolean; // bring file-mutation tools back into the automation lens
 }
 
+// Harness / orchestration / interaction tools — how the agent loop runs, never
+// scriptable work. Excluded from EVERY lens. (Grep/Glob are NOT here: repeated
+// searching signals a missing index/doc, its own kind of candidate.)
+const HARNESS_TOOLS =
+  "'Task','Agent','Workflow','Skill','SlashCommand','ExitPlanMode','EnterPlanMode'," +
+  "'AskUserQuestion','ToolSearch','TaskCreate','TaskUpdate','TaskList','KillShell','BashOutput'";
 // File-mutation tools are the SUBSTANCE of coding, not scriptable repetition —
-// excluded from the automation lens (tool-freq / tool-ngram) by default. Grep /
-// Glob stay: repeated searching signals a missing index/doc, its own candidate.
+// excluded from the automation lens (tool-freq / tool-ngram) unless --include-edits.
 const EDITOR_TOOLS = "'Read','Edit','Write','NotebookEdit'";
+// Web tools are exploratory I/O (every search/fetch differs), not deterministic
+// scriptable work — excluded from the automation lens.
+const WEB_TOOLS = "'WebSearch','WebFetch'";
 // Pure no-op shell — never an automation candidate (and `echo` banners pollute).
 const NOOP_BASH_PREFIXES = ["Bash:echo", "Bash:true", "Bash:sleep", "Bash::", "Bash:printf", "Bash:cd "];
 
@@ -85,12 +93,15 @@ function scopeParams(f: InsightFilter): Record<string, string | number> {
   return params;
 }
 
-// The automation-lens conditions on `tc`: drop file-mutation tools (unless
-// includeEdits) and pure no-op shell. `candidate=false` (errors lens) keeps
-// editors but still drops no-ops.
+// Conditions on `tc`. Harness/orchestration tools are dropped from EVERY lens.
+// The automation lens (`candidate=true`) additionally drops web tools and
+// file-mutation tools (unless includeEdits). No-op shell is always dropped.
 function candidateConds(f: InsightFilter, candidate: boolean): string[] {
-  const parts: string[] = [];
-  if (candidate && !f.includeEdits) parts.push(`tc.name NOT IN (${EDITOR_TOOLS})`);
+  const parts: string[] = [`tc.name NOT IN (${HARNESS_TOOLS})`];
+  if (candidate) {
+    parts.push(`tc.name NOT IN (${WEB_TOOLS})`);
+    if (!f.includeEdits) parts.push(`tc.name NOT IN (${EDITOR_TOOLS})`);
+  }
   for (const pre of NOOP_BASH_PREFIXES) parts.push(`tc.arg_sig NOT LIKE '${pre}%'`);
   return parts;
 }
