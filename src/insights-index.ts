@@ -21,8 +21,8 @@ export function makeInsightsWriter(db: Database): InsightsWriter {
   const del = db.prepare("DELETE FROM tool_call WHERE session_native_id = ?");
   const ins = db.prepare(`
     INSERT INTO tool_call
-      (session_native_id, seq, turn, name, arg_sig, est_tokens, has_error, error_class)
-    VALUES ($sid, $seq, $turn, $name, $sig, $tok, $err, $ec)
+      (session_native_id, seq, turn, name, arg_sig, detail, est_tokens, has_error, error_class)
+    VALUES ($sid, $seq, $turn, $name, $sig, $detail, $tok, $err, $ec)
   `);
   return {
     writeForSession(nativeId: string, events: Event[]): void {
@@ -35,6 +35,7 @@ export function makeInsightsWriter(db: Database): InsightsWriter {
           $turn: f.turn,
           $name: f.name,
           $sig: f.argSig,
+          $detail: f.detail,
           $tok: f.estTokens,
           $err: f.hasError ? 1 : 0,
           $ec: f.errorClass,

@@ -49,6 +49,7 @@ function sequenceLines(sid: string, reps: number): string[] {
     lines.push(...step(`${sid}-a${r}`, "Bash", { command: `curl -X POST https://api.superdesign.dev/v1/prompts -d @body${i++}.json` }, "ok " + "x".repeat(40)));
     lines.push(...step(`${sid}-b${r}`, "mcp__supabase__query", { sql: `select ${i++} from prompts` }, "rows ".repeat(10)));
     lines.push(...step(`${sid}-c${r}`, "Bash", { command: `gh pr create --title "item ${i++}"` }, "https://github.com/x/pr/1"));
+    lines.push(...step(`${sid}-i${r}`, "Bash", { command: `composio run --logs-off INTERCOM_SEARCH_CONVERSATIONS --params '{"q":${i++}}'` }, "conv list"));
   }
   // editor calls — excluded from the automation lens by default
   for (let r = 0; r < reps; r++) lines.push(...step(`${sid}-d${r}`, "Read", { file_path: `/repo/src/Component${i++}.tsx` }, "file contents ".repeat(20)));
@@ -108,6 +109,14 @@ describe("insights end-to-end", () => {
   test("Phase 3: count floor + no-op drop", () => {
     const r = run(["insights", "--analyzer", "tool-freq", "--path", PROJ]);
     for (const s of r.analyzers["tool-freq"]) expect(s.count).toBeGreaterThanOrEqual(3);
+  });
+
+  test("drill: composio bucket nests its sub-cluster (the Intercom slug) by default", () => {
+    const r = run(["insights", "--analyzer", "tool-freq", "--path", PROJ]);
+    const composio = r.analyzers["tool-freq"].find((s: any) => s.key === "Bash:composio run");
+    expect(composio).toBeTruthy();
+    expect(composio.details[0].key).toBe("INTERCOM_SEARCH_CONVERSATIONS");
+    expect(composio.details[0].count).toBe(4);
   });
 
   test("Phase 4: tool-errors surfaces the recurring failure with a sample", () => {

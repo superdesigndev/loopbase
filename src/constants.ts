@@ -16,8 +16,8 @@ export const BIN_NAME = "loopbase";
 // user-authored worklog is preserved.
 // (v3: codex semantic titles + AGENTS.md skip. v4: token + cost tables.
 // v5: cost accuracy — dedup duplicate usage rows + count subagent/workflow spend.
-// v6: tool_call fact table for insights.)
-export const SCHEMA_VERSION = 6;
+// v6: tool_call fact table for insights. v7: + detail sub-cluster column.)
+export const SCHEMA_VERSION = 7;
 
 import { homedir } from "node:os";
 import { join } from "node:path";

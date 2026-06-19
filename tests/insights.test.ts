@@ -2,7 +2,7 @@ import { test, expect, describe, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { argSig, stripNoise, errorClass, extractToolCalls } from "../src/insights-extract.ts";
+import { argSig, stripNoise, errorClass, extractToolCalls, callDetail } from "../src/insights-extract.ts";
 import { openDb, closeDb } from "../src/db.ts";
 import { handle } from "../src/server.ts";
 import type { Event } from "../src/adapters/types.ts";
@@ -102,6 +102,20 @@ describe("argSig — signature normalization", () => {
   });
 });
 
+describe("callDetail — sub-cluster within a signature", () => {
+  test("ALLCAPS API slug wins (composio → the Intercom tool)", () => {
+    expect(callDetail({ command: 'composio run --logs-off INTERCOM_SEARCH_CONVERSATIONS --params x' })).toBe("INTERCOM_SEARCH_CONVERSATIONS");
+  });
+  test("falls back to SQL table", () => {
+    expect(callDetail({ command: 'supabase db query --linked "SELECT * FROM subscriptions"' })).toBe("→subscriptions");
+  });
+  test("falls back to a normalized command shape", () => {
+    const a = callDetail({ command: "git commit -m 'a'" });
+    const b = callDetail({ command: "git commit -m 'b'" });
+    expect(a).toBe(b); // values stripped → same shape
+  });
+});
+
 describe("stripNoise — anti-fragmentation", () => {
   test("temp paths, hashes, dates, long digit runs become placeholders", () => {
     expect(stripNoise("/tmp/claude-502/x.png")).toBe("·path");
@@ -177,10 +191,10 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
       1000,
     );
     const ins = db.prepare(
-      "INSERT INTO tool_call (session_native_id, seq, turn, name, arg_sig, est_tokens, has_error, error_class) VALUES (?,?,?,?,?,?,?,?)",
+      "INSERT INTO tool_call (session_native_id, seq, turn, name, arg_sig, detail, est_tokens, has_error, error_class) VALUES (?,?,?,?,?,?,?,?,?)",
     );
     // 4 identical automatable calls → above the count floor of 3
-    for (let i = 0; i < 4; i++) ins.run("ses12345extra", i, 0, "Bash", "Bash:composio run", 500, 0, null);
+    for (let i = 0; i < 4; i++) ins.run("ses12345extra", i, 0, "Bash", "Bash:composio run", "INTERCOM_SEARCH_CONVERSATIONS", 500, 0, null);
     return db;
   }
 
@@ -192,6 +206,7 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     expect(sig.key).toBe("Bash:composio run");
     expect(sig.count).toBe(4);
     expect(sig.project).toBe("proj"); // dominant repo attribution
+    expect(sig.details[0].key).toBe("INTERCOM_SEARCH_CONVERSATIONS"); // nested drill
     expect(sig.examples[0].session).toBe("ses12345"); // shortId = first 8 chars
   });
 

@@ -43,9 +43,12 @@ export interface Signal {
   tokens: number;
   sessions: number;
   project: string | null; // dominant repo for this bucket (basename), so --all is legible
+  details?: { key: string; count: number }[]; // top sub-clusters (slug/table/shape)
   examples: { session: string; turn: number | null }[];
   sample?: string; // optional display extra (sample error, member tools, …)
 }
+
+const MAX_DETAILS = 3; // sub-clusters nested in the default view
 
 function projectBase(p: string | null): string | null {
   if (!p) return null;
@@ -127,6 +130,27 @@ function examplesForSig(f: InsightFilter, name: string, argSig: string, onlyErro
     .map((r) => ({ session: (r as any).session as string, turn: (r as any).turn as number | null }));
 }
 
+// Top sub-clusters within a (name, arg_sig) bucket — a cheap GROUP BY over the
+// stored `detail` column (no transcript re-read). This is the drill, default-on.
+// `limit = 0` skips it (e.g. when the caller doesn't want nesting).
+export function detailsFor(f: InsightFilter, name: string, argSig: string, limit: number): { key: string; count: number }[] {
+  if (limit <= 0) return [];
+  const db = openDb();
+  const conds = scopeConds(f, "s");
+  const sql =
+    "SELECT COALESCE(tc.detail, '') AS key, COUNT(*) AS count" +
+    " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
+    " WHERE tc.name = $n AND tc.arg_sig = $sig" +
+    (conds.length ? " AND " + conds.join(" AND ") : "") +
+    " GROUP BY tc.detail ORDER BY count DESC LIMIT $cap";
+  const rows = db
+    .query(sql)
+    .all({ ...scopeParams(f), $n: name, $sig: argSig, $cap: limit } as Record<string, string | number>) as { key: string; count: number }[];
+  // A single sub-cluster that just restates the bucket adds nothing — drop it.
+  if (rows.length === 1 && (rows[0]!.key === "" || rows[0]!.key === argSig)) return [];
+  return rows;
+}
+
 // tool-freq: "what did we do over and over." GROUP BY (name, arg_sig), through
 // the automation lens (file-mutation tools excluded unless includeEdits).
 export function toolFreq(f: InsightFilter): Signal[] {
@@ -157,6 +181,7 @@ export function toolFreq(f: InsightFilter): Signal[] {
     tokens: r.tokens,
     sessions: r.sessions,
     project: projectBase(r.project),
+    details: detailsFor(f, r.name, r.arg_sig, MAX_DETAILS),
     examples: examplesForSig(f, r.name, r.arg_sig),
   }));
 }
@@ -197,6 +222,7 @@ export function toolErrors(f: InsightFilter): Signal[] {
     tokens: r.tokens,
     sessions: r.sessions,
     project: projectBase(r.project),
+    details: detailsFor(f, r.name, r.arg_sig, MAX_DETAILS),
     examples: examplesForSig(f, r.name, r.arg_sig, true),
     ...(r.sample ? { sample: r.sample } : {}),
   }));

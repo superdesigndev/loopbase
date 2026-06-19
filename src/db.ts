@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS tool_call (
   turn              INTEGER,            -- user-turn ordinal; null if pre-first-turn
   name              TEXT NOT NULL,      -- tool name (Bash, Read, mcp__x__y, …)
   arg_sig           TEXT NOT NULL,      -- normalized signature (the bucket key)
+  detail            TEXT,               -- finer sub-cluster (slug/table/shape) for drill
   est_tokens        INTEGER DEFAULT 0,  -- I/O-size token estimate (cost weight)
   has_error         INTEGER DEFAULT 0,
   error_class       TEXT,

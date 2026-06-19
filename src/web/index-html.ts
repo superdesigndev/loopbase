@@ -137,6 +137,7 @@ ${FONT_FACE_CSS}
   .ins-row .key { font-family:var(--mono); font-size:12.5px; color:var(--fg); word-break:break-word; }
   .ins-row .key .sample { color:var(--dim2); font-style:italic; }
   .ins-row .proj-tag { display:inline-block; background:var(--line2); color:var(--dim2); border-radius:4px; padding:0 6px; font-size:11px; margin-right:2px; }
+  .ins-row .det { display:block; margin-top:3px; color:var(--dim2); font-size:11px; font-family:var(--mono); }
   .ins-row .ex { display:block; margin-top:3px; color:var(--dim); font-size:11px; font-family:var(--mono); }
   ::-webkit-scrollbar { width:11px; height:11px; }
   ::-webkit-scrollbar-thumb { background:var(--line2); border:3px solid var(--bg); border-radius:6px; }
@@ -405,9 +406,10 @@ async function loadInsights() {
     for (const r of rows) {
       const ex = (r.examples || []).map(e => e.session + (e.turn != null ? "#" + e.turn : "")).join("  ");
       const proj = r.project ? '<span class="proj-tag">' + escapeHtml(r.project) + '</span> ' : '';
+      const det = (r.details && r.details.length) ? '<span class="det">┗ ' + r.details.map(d => escapeHtml((d.key || '(misc)') + ' ×' + d.count)).join('  ·  ') + '</span>' : '';
       html += '<div class="ins-row"><span class="num">' + fmtTok(r.count) + '×</span><span class="num">' + fmtTok(r.tokens) + '</span><span class="num">' + r.sessions + ' s</span>' +
         '<span class="key">' + proj + escapeHtml(r.key) + (r.sample ? ' <span class="sample">«' + escapeHtml(r.sample) + '»</span>' : '') +
-        (ex ? '<span class="ex">' + escapeHtml(ex) + '</span>' : '') + '</span></div>';
+        det + (ex ? '<span class="ex">' + escapeHtml(ex) + '</span>' : '') + '</span></div>';
     }
     html += '</div>';
   }

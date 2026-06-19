@@ -17,6 +17,7 @@ export interface ToolCallFact {
   turn: number | null;
   name: string;
   argSig: string;
+  detail: string; // finer sub-cluster within argSig (slug / table / shape)
   estTokens: number; // estimate from I/O byte size (input + result) / 4
   hasError: boolean;
   errorClass: string | null;
@@ -178,6 +179,48 @@ export function errorClass(resultText: string): string | null {
   return stripNoise(firstLine).slice(0, 60);
 }
 
+// The raw body to sub-cluster on: a Bash command / a query / the input JSON.
+function bodyOf(input: unknown, inputSummary?: string): string {
+  const obj = input && typeof input === "object" ? (input as Record<string, unknown>) : undefined;
+  if (typeof obj?.command === "string") return obj.command;
+  if (typeof obj?.query === "string") return obj.query;
+  if (typeof obj?.sql === "string") return obj.sql;
+  if (obj) {
+    try {
+      return JSON.stringify(obj);
+    } catch {
+      /* fall through */
+    }
+  }
+  return inputSummary ?? "";
+}
+
+// Structural shape of a command: strip the value-bearing bits (paths, numbers,
+// quoted strings) so "the same kind of call" collapses.
+function shapeOf(cmd: string): string {
+  let n = cmd.trim();
+  n = n.replace(/^cd\s+("[^"]*"|\S+)\s*&&\s*/, "");
+  n = n.replace(/\/[^\s"']+/g, "PATH");
+  n = n.replace(/"[^"]*"/g, "STR").replace(/'[^']*'/g, "STR");
+  n = n.replace(/\b\d+\b/g, "N");
+  n = n.replace(/\s+/g, " ").trim();
+  return n.slice(0, 80);
+}
+
+// The finer sub-cluster WITHIN a signature, computed once at index time so the
+// drill is a cheap GROUP BY (no transcript re-read). Picks the most salient:
+// an ALLCAPS API slug (Composio/Intercom/…), else a SQL table, else the shape.
+export function callDetail(input: unknown, inputSummary?: string): string {
+  const body = bodyOf(input, inputSummary);
+  const slug = body.match(/\b[A-Z][A-Z0-9]{2,}_[A-Z0-9_]+\b/);
+  if (slug) return slug[0];
+  // SQL keywords are uppercase in these scripts; case-sensitive avoids matching
+  // prose like "from the …" in agent prompts.
+  const tbl = body.match(/\b(?:FROM|JOIN|INTO|UPDATE)\s+([a-z_][a-z0-9_.]+)/);
+  if (tbl) return "→" + tbl[1]!.toLowerCase();
+  return shapeOf(body);
+}
+
 // Estimate the token weight of a tool call from its I/O byte size — a self
 // contained proxy (no token-usage join) that captures the real cost driver: big
 // inputs (writing a large file) and big results (a command dumping thousands of
@@ -223,6 +266,7 @@ export function extractToolCalls(events: Event[]): ToolCallFact[] {
           turn: turnNo < 0 ? null : turnNo,
           name: t.name,
           argSig: argSig(t.name, t.input, t.inputSummary),
+          detail: callDetail(t.input, t.inputSummary),
           estTokens: estTokensFor(t.input, t.inputSummary, r?.len ?? 0),
           hasError: r?.err === true,
           errorClass: r?.err ? errorClass(findResultText(events, t.id)) : null,

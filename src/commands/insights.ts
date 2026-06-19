@@ -68,6 +68,7 @@ function signalView(s: Signal) {
     tokens: s.tokens,
     sessions: s.sessions,
     ...(s.project ? { project: s.project } : {}),
+    ...(s.details && s.details.length ? { details: s.details } : {}),
     ...(s.sample ? { sample: s.sample } : {}),
     examples: s.examples.map((e) => ({ session: shortId(e.session), turn: e.turn })),
   };
@@ -91,6 +92,9 @@ function renderText(project: string | null, groups: Record<string, ReturnType<ty
       const extra = r.sample ? `  «${r.sample}»` : "";
       const proj = r.project ? `  [${r.project}]` : "";
       lines.push(`  ${k(r.count).padStart(5)}×  ${k(r.tokens).padStart(6)} tok  ${r.sessions} sess${proj}  ${r.key}${extra}`);
+      if (r.details && r.details.length) {
+        lines.push("         ┗ " + r.details.map((d) => `${d.key || "(misc)"} ×${d.count}`).join("  ·  "));
+      }
       if (ex) lines.push(`         e.g. ${BIN_NAME} show ${ex.split(" ")[0]!.replace("#", " --turn ")}`);
     }
   }
