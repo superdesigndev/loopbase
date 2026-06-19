@@ -2,12 +2,13 @@
 // each adapter's transcript files, skips unchanged ones by mtime, re-parses the
 // rest, and upserts session/subagent rows. (PLAN.md → Incremental indexer.)
 
-import { openDb, resetDb } from "./db.ts";
+import { openDb, resetDb, withBusyRetry } from "./db.ts";
 import { ADAPTERS } from "./adapters/registry.ts";
 import { resolveProject, currentGitBranch } from "./project.ts";
 import type { SourceFile } from "./adapters/types.ts";
 import { loadCatalog } from "./pricing.ts";
 import { makeCostWriter } from "./cost-index.ts";
+import { makeInsightsWriter } from "./insights-index.ts";
 
 export interface IndexStats {
   scanned: number;
@@ -44,6 +45,8 @@ export function reindex(opts: { rebuild?: boolean } = {}): IndexStats {
   // Cost layer: load the price catalog once, memoize cost per session as we go.
   const { catalog, version } = loadCatalog();
   const costWriter = makeCostWriter(db, catalog, version);
+  // Insights layer: extract tool-call facts from the same parsed events.
+  const insightsWriter = makeInsightsWriter(db);
   // Subagent (Task + nested workflow) token usage rolls into the PARENT
   // session's cost — ccusage counts these sidecar files. Adapters expose all of
   // them via subagentFilesFor(); track parents whose cost needs a rewrite
@@ -130,6 +133,13 @@ export function reindex(opts: { rebuild?: boolean } = {}): IndexStats {
       } catch {
         // skip cost for this session; transcript indexing already succeeded
       }
+      // Extract tool-call facts from the events we already parsed. Never let an
+      // insights fault break indexing of the session itself.
+      try {
+        insightsWriter.writeForSession(meta.nativeId, events);
+      } catch {
+        // skip insights facts for this session; transcript indexing succeeded
+      }
       stats.updated++;
     }
 
@@ -153,7 +163,11 @@ export function reindex(opts: { rebuild?: boolean } = {}): IndexStats {
   ADAPTERS.forEach((adapter, adapterIdx) => {
     for (const file of safeEnumerate(adapter)) queue.push({ adapterIdx, file });
   });
-  tx(queue);
+  // The whole scan is one write transaction — under contention (a concurrent
+  // `lb log` or a `lb serve` request reindexing) a waiter can still lose the
+  // lock after busy_timeout, so retry. Upserts are idempotent; a re-run just
+  // re-skips the already-indexed files by mtime.
+  withBusyRetry(() => tx(queue));
 
   return stats;
 }

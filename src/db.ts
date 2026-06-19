@@ -78,10 +78,12 @@ CREATE TABLE IF NOT EXISTS message_tokens (
   token_source          TEXT NOT NULL,      -- 'usage_metadata'
   total_usd             REAL,               -- MEMOIZED at index; null if unpriced
   pricing_source        TEXT,               -- catalog stamp; 'estimated:…' if read-time-filled
+  dedup_key             TEXT,               -- message id:requestId — stable join key for insights cost
   PRIMARY KEY (session_native_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_mtok_session ON message_tokens(session_native_id);
 CREATE INDEX IF NOT EXISTS idx_mtok_offset  ON message_tokens(session_native_id, offset);
+CREATE INDEX IF NOT EXISTS idx_mtok_dedup   ON message_tokens(session_native_id, dedup_key);
 
 -- Per-(session, model) rollup. The sessions list reads ONLY this table; it is
 -- never produced by scanning message_tokens at read time. Derived.
@@ -104,6 +106,28 @@ CREATE TABLE IF NOT EXISTS session_cost (
   PRIMARY KEY (session_native_id, model)
 );
 CREATE INDEX IF NOT EXISTS idx_scost_session ON session_cost(session_native_id);
+
+-- One row per tool call in a session's main transcript. The stored FACT layer
+-- for insights; aggregates (frequency, sequences, errors) are computed at READ
+-- time over this table, never materialized. Derived; rebuilt from source.
+-- turn = the user-turn ordinal containing the call, so an insight example
+-- feeds straight into 'show --turn'. (docs/INSIGHTS.md -> architecture.)
+CREATE TABLE IF NOT EXISTS tool_call (
+  session_native_id TEXT NOT NULL,
+  seq               INTEGER NOT NULL,   -- tool-call index within the session
+  turn              INTEGER,            -- user-turn ordinal; null if pre-first-turn
+  name              TEXT NOT NULL,      -- tool name (Bash, Read, mcp__x__y, …)
+  arg_sig           TEXT NOT NULL,      -- normalized signature (the bucket key)
+  detail            TEXT,               -- finer sub-cluster (slug/table/shape) for drill
+  dedup_key         TEXT,               -- issuing assistant msg id:requestId (cost join)
+  est_tokens        INTEGER DEFAULT 0,  -- I/O-size token estimate (fallback weight)
+  has_error         INTEGER DEFAULT 0,
+  error_class       TEXT,
+  PRIMARY KEY (session_native_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_toolcall_session ON tool_call(session_native_id);
+CREATE INDEX IF NOT EXISTS idx_toolcall_sig ON tool_call(name, arg_sig);
+CREATE INDEX IF NOT EXISTS idx_toolcall_dedup ON tool_call(session_native_id, dedup_key);
 `;
 
 let _db: Database | null = null;
@@ -114,7 +138,12 @@ export function openDb(): Database {
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path, { create: true });
   db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA busy_timeout = 3000;");
+  // Daemonless: many processes (every `lb` command + each `lb serve` request +
+  // concurrent agents calling `lb log`) write to this one file. WAL serializes
+  // writers, and a full reindex can hold the write lock for seconds — so give a
+  // waiter a generous window before it gives up. Paired with withBusyRetry() on
+  // the write entrypoints for the rare case the window is still exceeded.
+  db.exec("PRAGMA busy_timeout = 10000;");
   // Migrate BEFORE applying SCHEMA: a stale derived table can lack columns that
   // SCHEMA's CREATE INDEX references, which would throw. So drop stale derived
   // tables first, then (re)create everything. worklog + meta are preserved.
@@ -125,7 +154,8 @@ export function openDb(): Database {
   if (stale) {
     db.exec(
       "DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS agent_threads;" +
-        " DROP TABLE IF EXISTS message_tokens; DROP TABLE IF EXISTS session_cost;",
+        " DROP TABLE IF EXISTS message_tokens; DROP TABLE IF EXISTS session_cost;" +
+        " DROP TABLE IF EXISTS tool_call;",
     );
   }
   db.exec(SCHEMA);
@@ -141,6 +171,28 @@ export function openDb(): Database {
   }
   _db = db;
   return db;
+}
+
+// Run a write through a bounded retry on SQLite "database is locked"
+// (SQLITE_BUSY) — the daemonless safety net. busy_timeout already waits inside
+// SQLite; this covers the rare case a writer still loses the race after that
+// (e.g. a full reindex in another process held the lock the whole window). Reads
+// never need this; only writers contend. Idempotent writes only (our upserts +
+// the worklog insert are), so a re-run is safe.
+export function isBusyError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /database is locked|SQLITE_BUSY|database table is locked/i.test(msg);
+}
+
+export function withBusyRetry<T>(fn: () => T, tries = 5): T {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fn();
+    } catch (e) {
+      if (attempt >= tries - 1 || !isBusyError(e)) throw e;
+      Bun.sleepSync(80 * (attempt + 1)); // brief, escalating backoff
+    }
+  }
 }
 
 // Drop + recreate the DERIVED tables only (what `index --rebuild` calls). NEVER

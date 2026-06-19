@@ -75,6 +75,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "regex", type: "bool", default: false, desc: "Treat the query as a regular expression." },
       { name: "include-tools", type: "bool", default: false, desc: "Also search tool inputs/results (noisier)." },
       { name: "files", type: "bool", default: false, desc: "Only list matching sessions + raw file paths (grep -l style), for custom piping." },
+      { name: "include-current", type: "bool", default: false, desc: "Include the caller's own session (excluded by default — it echoes the query you just typed)." },
     ],
   },
   {
@@ -109,8 +110,23 @@ export const COMMANDS: CommandSpec[] = [
     ],
   },
   {
+    name: "insights",
+    summary: "Ranked automation candidates: repeated/expensive tool patterns, call sequences, and errors.",
+    args: [],
+    flags: [
+      { name: "analyzer", type: "string", desc: "Comma-separated. Default: tool-freq, tool-errors, tool-ngram. Opt-in: tool-error-retry, user-correction (reads transcripts)." },
+      { name: "path", type: "string", desc: "Scope to another directory instead of cwd." },
+      { name: "all", type: "bool", default: false, desc: "Every project, not just the current one." },
+      { name: "since", type: "string", desc: "Only sessions updated within this window, e.g. 24h, 7d." },
+      { name: "agent", type: "enum", enumValues: ["claude", "codex", "pi"], desc: "Filter by agent." },
+      { name: "top", type: "int", default: 20, desc: "Max candidates per analyzer." },
+      { name: "include-edits", type: "bool", default: false, desc: "Include file-mutation tools (Read/Edit/Write) in the automation lens — off by default (they're the substance of coding, not scriptable)." },
+      { name: "show-signature", type: "bool", default: false, desc: "Debug: print raw tool call -> normalized signature, to eyeball collapse quality." },
+    ],
+  },
+  {
     name: "serve",
-    summary: "Local web UI for sessions + cost (reads the index; re-indexes on each load).",
+    summary: "Local web UI — cost, the global worklog feed, and insights (reads the index; re-indexes on each load).",
     args: [],
     flags: [{ name: "port", type: "int", default: 4178, desc: "Port to listen on (default 4178)." }],
   },

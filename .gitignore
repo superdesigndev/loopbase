@@ -4,5 +4,7 @@ dist/
 .DS_Store
 
 # excluded from the repo for now
-PLAN.md
 docs/
+PLAN.md
+/.claude
+.playwright-cli/

@@ -7,13 +7,21 @@ export const PRODUCT_NAME = "loopbase";
 // alias (both are bin entries); change here to re-canonicalize.
 export const BIN_NAME = "loopbase";
 
-// Version of the DERIVED index data. Bump on a schema change OR an adapter
-// parsing change (titles, turns, branch, etc.) — on a mismatch the derived
-// tables (sessions, agent_threads, message_tokens, session_cost) are dropped +
-// rebuilt from source files, while the user-authored worklog is preserved.
+// Version of the DERIVED index data. Bump on a schema change OR any extraction
+// change that feeds a derived table — adapter parsing (titles, turns, branch),
+// cost token logic, OR the insights `argSig`/fact extraction (cached in
+// tool_call, so a logic change leaves stale signatures until a rebuild). On a
+// mismatch the derived tables (sessions, agent_threads, message_tokens,
+// session_cost, tool_call) are dropped + rebuilt from source files, while the
+// user-authored worklog is preserved.
 // (v3: codex semantic titles + AGENTS.md skip. v4: token + cost tables.
-// v5: cost accuracy — dedup duplicate usage rows + count subagent/workflow spend.)
-export const SCHEMA_VERSION = 5;
+// v5: cost accuracy — dedup duplicate usage rows + count subagent/workflow spend.
+// v6: tool_call fact table for insights. v7: + detail sub-cluster column.
+// v8: soft-error reclassification (read-before-edit / cancellations not errors).
+// v9: + msg_offset on tool_call → real USD attribution per bucket.
+// v10: dedup re-logged assistant messages in extraction (accurate counts + cost join).
+// v11: cost join on message id (dedup_key) not byte offset — handles streaming partials.)
+export const SCHEMA_VERSION = 18;
 
 import { homedir } from "node:os";
 import { join } from "node:path";

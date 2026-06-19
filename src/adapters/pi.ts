@@ -74,7 +74,13 @@ export const piAdapter: Adapter = {
   },
 
   resolveCurrentSession(): string | null {
-    return null; // pi exposes no session-id env var → mtime fallback
+    // Verified (pi 0.78.1): unlike codex's CODEX_THREAD_ID, pi injects NOTHING
+    // into the env of the shell tools it spawns, so a spawned `lb` cannot know
+    // the active session on its own — null is correct, not a guess. The only
+    // path is opt-in: pi's bash `spawnHook` ({command,cwd,env})=>… can inject one
+    // (e.g. env.PI_SESSION_FILE = ctx.sessionManager.getSessionFile()), and we'd
+    // read it here. Until such a hook is installed, pi has no exclude-current.
+    return process.env.PI_SESSION_FILE ? piIdFromFile(process.env.PI_SESSION_FILE) : null;
   },
 
   // Pi MAY carry a `usage` block per assistant message (often absent). Field
@@ -131,4 +137,12 @@ function safeMtime(path: string): number {
   } catch {
     return 0;
   }
+}
+
+// The nativeId for a pi session file = the UUID tail of `<ts>_<uuid>.jsonl`
+// (same derivation as deriveMeta). Used to map an injected session-file path
+// back to the indexed session for exclude-current.
+function piIdFromFile(file: string): string | null {
+  const m = file.match(/_([0-9a-f-]{36})\.jsonl$/i);
+  return m ? m[1]! : null;
 }

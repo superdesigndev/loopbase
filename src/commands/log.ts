@@ -4,7 +4,7 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { reindex } from "../indexer.ts";
-import { openDb } from "../db.ts";
+import { openDb, withBusyRetry } from "../db.ts";
 import { resolveSession, type SessionRow } from "../queries.ts";
 import { ADAPTERS, adapterFor } from "../adapters/registry.ts";
 import { turnByteOffsets } from "./show.ts";
@@ -82,24 +82,28 @@ export function runLog(inv: Invocation): void {
     );
   }
 
-  db.query(
-    `INSERT INTO worklog (id, session_native_id, project, text, body, tags, from_offset, to_offset, msg_count, created_at, content_hash)
-     VALUES ($id, $sid, $project, $text, $body, $tags, $from, $to, $count, $created, $hash)`,
-  ).run({
-    $id: id,
-    $sid: session.native_id,
-    $project: session.project,
-    $text: text,
-    $body: body,
-    $tags: tags,
-    $from: from,
-    $to: tail,
-    $count: capturedMsgs,
-    $created: Date.now(),
-    $hash: hash,
+  // Write under a busy-retry: another process may hold the write lock (a
+  // concurrent reindex from `lb serve` or another agent's `lb log`).
+  withBusyRetry(() => {
+    db.query(
+      `INSERT INTO worklog (id, session_native_id, project, text, body, tags, from_offset, to_offset, msg_count, created_at, content_hash)
+       VALUES ($id, $sid, $project, $text, $body, $tags, $from, $to, $count, $created, $hash)`,
+    ).run({
+      $id: id,
+      $sid: session.native_id,
+      $project: session.project,
+      $text: text,
+      $body: body,
+      $tags: tags,
+      $from: from,
+      $to: tail,
+      $count: capturedMsgs,
+      $created: Date.now(),
+      $hash: hash,
+    });
+    // Advance the cursor so the next log spans only new messages.
+    db.query("UPDATE sessions SET last_logged_offset = ? WHERE native_id = ?").run(tail, session.native_id);
   });
-  // Advance the cursor so the next log spans only new messages.
-  db.query("UPDATE sessions SET last_logged_offset = ? WHERE native_id = ?").run(tail, session.native_id);
 
   emit({ ok: true, id, captured_msgs: capturedMsgs }, inv.mode);
 }
@@ -150,22 +154,24 @@ function runRetroLog(inv: Invocation, session: SessionRow, text: string, tags: s
     return;
   }
   const id = "lg_" + randomBytes(3).toString("hex");
-  db.query(
-    `INSERT INTO worklog (id, session_native_id, project, text, body, tags, from_offset, to_offset, msg_count, created_at, content_hash)
-     VALUES ($id, $sid, $project, $text, $body, $tags, $from, $to, $count, $created, $hash)`,
-  ).run({
-    $id: id,
-    $sid: session.native_id,
-    $project: session.project,
-    $text: text,
-    $body: body,
-    $tags: tags,
-    $from: fromOff,
-    $to: toOff,
-    $count: msgs,
-    $created: Date.now(),
-    $hash: hash,
-  });
+  withBusyRetry(() =>
+    db.query(
+      `INSERT INTO worklog (id, session_native_id, project, text, body, tags, from_offset, to_offset, msg_count, created_at, content_hash)
+       VALUES ($id, $sid, $project, $text, $body, $tags, $from, $to, $count, $created, $hash)`,
+    ).run({
+      $id: id,
+      $sid: session.native_id,
+      $project: session.project,
+      $text: text,
+      $body: body,
+      $tags: tags,
+      $from: fromOff,
+      $to: toOff,
+      $count: msgs,
+      $created: Date.now(),
+      $hash: hash,
+    }),
+  );
   // Intentionally NOT advancing last_logged_offset — a retro-tag describes the
   // past; the forward cursor keeps spanning from where it was.
   emit({ ok: true, id, captured_msgs: msgs, turns: `${fromTurn}-${toTurn}` }, inv.mode);

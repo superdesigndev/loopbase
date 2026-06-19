@@ -97,7 +97,11 @@ export const codexAdapter: Adapter = {
   },
 
   resolveCurrentSession(): string | null {
-    return process.env.CODEX_SESSION_ID ?? null; // none known → caller uses mtime fallback
+    // Codex calls a session a "thread" and injects its id into the env of every
+    // shell command it spawns (verified live: CODEX_THREAD_ID === the rollout
+    // filename's UUID tail === session_meta.id === our nativeId). There is no
+    // CODEX_SESSION_ID. `lb` runs inside that shell, so this resolves the caller.
+    return process.env.CODEX_THREAD_ID ?? null;
   },
 
   // Codex reports CUMULATIVE token totals on `event_msg`/`token_count` events

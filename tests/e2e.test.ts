@@ -106,7 +106,9 @@ describe("end-to-end (cli over a fixture session)", () => {
   });
 
   test("search finds content and returns the turn handle", () => {
-    const r = run(["search", "first task", "--path", PROJ]);
+    // the fixture session is the caller's own (CLAUDE_CODE_SESSION_ID=SID), so
+    // it's excluded by default — opt back in with --include-current.
+    const r = run(["search", "first task", "--path", PROJ, "--include-current"]);
     expect(r.matches.length).toBeGreaterThanOrEqual(1);
     const m = r.matches.find((x: any) => x.session === SID.slice(0, 8));
     expect(m).toBeTruthy();
@@ -114,8 +116,24 @@ describe("end-to-end (cli over a fixture session)", () => {
     expect(m.snippet.toLowerCase()).toContain("first task");
   });
 
+  test("search excludes the caller's own session by default", () => {
+    const r = run(["search", "first task", "--path", PROJ]);
+    expect(r.matches.length).toBe(0);
+    expect(r.excluded_current).toBe(true);
+  });
+
+  test("search falls back to token matching when the exact phrase is absent", () => {
+    // content is "first task please" — "first please" never appears contiguously,
+    // so exact match misses and the token fallback (every word present) catches it.
+    const r = run(["search", "first please", "--path", PROJ, "--include-current"]);
+    expect(r.mode).toBe("tokenized");
+    expect(r.tokens).toEqual(["first", "please"]);
+    expect(r.matches.length).toBeGreaterThanOrEqual(1);
+    expect(r.matches[0].turn).toBe(0);
+  });
+
   test("search --files returns matching raw paths (no parsing)", () => {
-    const r = run(["search", "first task", "--path", PROJ, "--files"]);
+    const r = run(["search", "first task", "--path", PROJ, "--files", "--include-current"]);
     expect(r.matches).toBeUndefined();
     expect(r.files.some((f: any) => f.session === SID.slice(0, 8) && f.path.endsWith(".jsonl"))).toBe(true);
   });
