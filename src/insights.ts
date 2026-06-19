@@ -348,11 +348,99 @@ export function toolNgram(f: InsightFilter): Signal[] {
   return out.slice(0, f.top);
 }
 
+// tool-error-retry: a REGRET signal — a tool that genuinely failed (soft
+// harness/user artifacts already reclassified as non-errors) and then the agent
+// retried the SAME call within a few steps. That's friction the agent keeps
+// hitting; a recurring one is a candidate for a guardrail or a fix. Ranked by
+// cross-session RECURRENCE (the same friction across many sessions matters; a
+// one-session thrash doesn't), never by a per-incident cost (a fix can span
+// several turns, so attributing "wasted $" would be dishonest).
+const RETRY_WINDOW = 5; // a retry of the same sig within N later calls = a loop
+
+export function toolErrorRetry(f: InsightFilter): Signal[] {
+  const db = openDb();
+  // Errors lens (harness + no-op dropped; editors/web kept — a flaky API or a
+  // real Edit failure that's retried is exactly the signal).
+  const w = whereFor(f, false);
+  const rows = db
+    .query(
+      "SELECT tc.session_native_id, tc.seq, tc.name, tc.arg_sig, tc.has_error, tc.error_class, s.project" +
+        " FROM tool_call tc JOIN sessions s ON s.native_id = tc.session_native_id" +
+        w.where +
+        " ORDER BY tc.session_native_id, tc.seq",
+    )
+    .all(w.params) as (FactRow & { project: string | null })[];
+
+  const bySession = new Map<string, (FactRow & { project: string | null })[]>();
+  for (const r of rows) {
+    let arr = bySession.get(r.session_native_id);
+    if (!arr) bySession.set(r.session_native_id, (arr = []));
+    arr.push(r);
+  }
+
+  interface Acc {
+    count: number; // error→retry events
+    sessions: Set<string>;
+    projects: Map<string, number>;
+    errs: Map<string, number>; // error_class → count, for the sample
+    examples: { session: string; turn: number | null }[];
+  }
+  const buckets = new Map<string, Acc>();
+  for (const [sid, calls] of bySession) {
+    for (let i = 0; i < calls.length; i++) {
+      if (!calls[i]!.has_error) continue;
+      const sig = calls[i]!.arg_sig;
+      // Was the same call retried within the window?
+      let retried = false;
+      for (let j = i + 1; j < Math.min(calls.length, i + 1 + RETRY_WINDOW); j++) {
+        if (calls[j]!.arg_sig === sig) {
+          retried = true;
+          break;
+        }
+      }
+      if (!retried) continue;
+      let acc = buckets.get(sig);
+      if (!acc) buckets.set(sig, (acc = { count: 0, sessions: new Set(), projects: new Map(), errs: new Map(), examples: [] }));
+      acc.count++;
+      acc.sessions.add(sid);
+      const proj = calls[i]!.project;
+      if (proj) acc.projects.set(proj, (acc.projects.get(proj) ?? 0) + 1);
+      const ec = calls[i]!.error_class;
+      if (ec) acc.errs.set(ec, (acc.errs.get(ec) ?? 0) + 1);
+      if (acc.examples.length < MAX_EXAMPLES && !acc.examples.some((e) => e.session === sid)) {
+        acc.examples.push({ session: sid, turn: calls[i]!.turn });
+      }
+    }
+  }
+
+  const out: Signal[] = [];
+  for (const [sig, acc] of buckets) {
+    if (acc.sessions.size < NGRAM_MIN_SESSIONS || acc.count < MIN_COUNT) continue; // recurrence floor
+    const topProj = [...acc.projects.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+    const sample = [...acc.errs.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    out.push({
+      analyzer: "tool-error-retry",
+      key: sig,
+      score: acc.sessions.size, // recurrence-first
+      count: acc.count,
+      tokens: 0,
+      usd: null, // per-incident cost isn't attributable; don't imply one
+      sessions: acc.sessions.size,
+      project: projectBase(topProj),
+      examples: acc.examples,
+      ...(sample ? { sample } : {}),
+    });
+  }
+  out.sort((a, b) => b.sessions - a.sessions || b.count - a.count);
+  return out.slice(0, f.top);
+}
+
 // The registry. Add a detector = add a function + a key.
 export const ANALYZERS: Record<string, (f: InsightFilter) => Signal[]> = {
   "tool-freq": toolFreq,
   "tool-errors": toolErrors,
   "tool-ngram": toolNgram,
+  "tool-error-retry": toolErrorRetry,
 };
 
 export const ANALYZER_NAMES = Object.keys(ANALYZERS);

@@ -114,7 +114,7 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Ranked automation candidates: repeated/expensive tool patterns, call sequences, and errors.",
     args: [],
     flags: [
-      { name: "analyzer", type: "string", desc: "Comma-separated analyzers (default all): tool-freq, tool-ngram, tool-errors." },
+      { name: "analyzer", type: "string", desc: "Comma-separated analyzers (default all): tool-freq, tool-ngram, tool-errors, tool-error-retry." },
       { name: "path", type: "string", desc: "Scope to another directory instead of cwd." },
       { name: "all", type: "bool", default: false, desc: "Every project, not just the current one." },
       { name: "since", type: "string", desc: "Only sessions updated within this window, e.g. 24h, 7d." },

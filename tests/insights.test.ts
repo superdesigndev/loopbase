@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { argSig, stripNoise, errorClass, extractToolCalls, callDetail } from "../src/insights-extract.ts";
 import { openDb, closeDb } from "../src/db.ts";
 import { handle } from "../src/server.ts";
-import { toolFreq } from "../src/insights.ts";
+import { toolFreq, toolErrorRetry } from "../src/insights.ts";
 import type { Event } from "../src/adapters/types.ts";
 
 describe("argSig — signature normalization", () => {
@@ -230,7 +230,7 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
   test("default returns every analyzer group", async () => {
     seed();
     const j = (await handle(new Request("http://x/api/insights?all=true")).json()) as any;
-    expect(Object.keys(j.analyzers).sort()).toEqual(["tool-errors", "tool-freq", "tool-ngram"]);
+    expect(Object.keys(j.analyzers).sort()).toEqual(["tool-error-retry", "tool-errors", "tool-freq", "tool-ngram"]);
   });
 
   test("real USD is attributed from message_tokens and split across a message's tool calls", () => {
@@ -252,6 +252,32 @@ describe("serve /api/insights — reads through the shared analyzers", () => {
     const b = sigs.find((s) => s.key === "Bash:composio run")!;
     expect(b.count).toBe(3);
     expect(b.usd).toBeCloseTo(0.6, 6); // 0.15 + 0.15 + 0.30
+  });
+
+  test("tool-error-retry surfaces a real failure that's retried, ranked by recurrence", () => {
+    process.env.LB_SKIP_REINDEX = "1";
+    dir = mkdtempSync(join(tmpdir(), "lb-ins-"));
+    process.env.LB_HOME = dir;
+    const db = openDb();
+    const mkSess = (id: string) => db.prepare("INSERT INTO sessions (native_id, agent, project, path, msg_count, last_ts) VALUES (?,?,?,?,?,?)").run(id, "claude", "/p", "/x/" + id, 10, 1000);
+    mkSess("s1"); mkSess("s2");
+    const tc = db.prepare("INSERT INTO tool_call (session_native_id, seq, turn, name, arg_sig, detail, dedup_key, est_tokens, has_error, error_class) VALUES (?,?,?,?,?,?,?,?,?,?)");
+    // s1: two error→retry events on the same flaky call
+    tc.run("s1", 0, 0, "Bash", "Bash:flaky api", "x", null, 0, 1, "Exit code 1");
+    tc.run("s1", 1, 0, "Bash", "Bash:flaky api", "x", null, 0, 0, null); // retry
+    tc.run("s1", 2, 0, "Bash", "Bash:flaky api", "x", null, 0, 1, "Exit code 1");
+    tc.run("s1", 3, 0, "Bash", "Bash:flaky api", "x", null, 0, 0, null); // retry
+    // s2: one more event (→ recurrence across 2 sessions, 3 events total)
+    tc.run("s2", 0, 0, "Bash", "Bash:flaky api", "x", null, 0, 1, "Exit code 1");
+    tc.run("s2", 1, 0, "Bash", "Bash:flaky api", "x", null, 0, 0, null); // retry
+    // a one-off error that is NOT retried → must not appear
+    tc.run("s2", 2, 0, "Bash", "Bash:oneoff", "y", null, 0, 1, "boom");
+    const sigs = toolErrorRetry({ all: true, top: 20 });
+    expect(sigs.length).toBe(1);
+    expect(sigs[0]!.key).toBe("Bash:flaky api");
+    expect(sigs[0]!.count).toBe(3);
+    expect(sigs[0]!.sessions).toBe(2);
+    expect(sigs[0]!.sample).toBe("Exit code 1");
   });
 
   test("harness (Agent) and web (WebSearch) tools are excluded from the automation lens", async () => {

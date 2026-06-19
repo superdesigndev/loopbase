@@ -142,7 +142,7 @@ describe("insights end-to-end", () => {
 
   test("default runs all analyzers", () => {
     const r = run(["insights", "--path", PROJ]);
-    expect(Object.keys(r.analyzers).sort()).toEqual(["tool-errors", "tool-freq", "tool-ngram"]);
+    expect(Object.keys(r.analyzers).sort()).toEqual(["tool-error-retry", "tool-errors", "tool-freq", "tool-ngram"]);
   });
 
   test("bad --analyzer enumerates the valid set (self-healing)", () => {
